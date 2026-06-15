@@ -982,6 +982,32 @@ local function removeVehicleFromJavaList(list, vehicle)
     end
 end
 
+local function ensureVehicleInJavaList(list, vehicle)
+    if not list or not vehicle or not list.contains or not list.add then
+        return false, "missing-list-methods"
+    end
+
+    local okContains, containsVehicle = tryCall(function()
+        return list:contains(vehicle)
+    end)
+    if not okContains then
+        return false, containsVehicle
+    end
+
+    if containsVehicle then
+        return true, nil
+    end
+
+    local okAdd, errAdd = tryCall(function()
+        list:add(vehicle)
+    end)
+    if not okAdd then
+        return false, errAdd
+    end
+
+    return true, nil
+end
+
 local function getVehicleChunk(vehicle)
     if not vehicle then
         return nil
@@ -1132,29 +1158,48 @@ local function ensureVehicleChunkMatchesSquare(vehicle, square)
     end
 
     local originChunk = getVehicleChunk(vehicle)
-    if originChunk and originChunk ~= destChunk then
+    if not originChunk then
+        return false, "missing-origin-chunk"
+    end
+
+    if vehicle.setSquare then
+        tryCall(function()
+            vehicle:setSquare(square)
+        end)
+    end
+    if vehicle.setCurrent then
+        tryCall(function()
+            vehicle:setCurrent(square)
+        end)
+    end
+    if vehicle.setCurrentSquareFromPosition then
+        tryCall(function()
+            vehicle:setCurrentSquareFromPosition(vehicle:getX(), vehicle:getY(), vehicle:getZ())
+        end)
+    end
+
+    -- BaseVehicle.update migrates vehicle.chunk when current square moves to a new chunk.
+    if vehicle.update then
+        local okUpdate, errUpdate = tryCall(function()
+            vehicle:update()
+        end)
+        if not okUpdate then
+            return false, errUpdate
+        end
+    end
+
+    local currentChunk = getVehicleChunk(vehicle)
+    if currentChunk ~= destChunk then
+        return false, "vehicle-chunk-mismatch"
+    end
+
+    if originChunk ~= destChunk then
         removeVehicleFromJavaList(originChunk.vehicles, vehicle)
     end
 
-    local okSetChunk, errSetChunk = tryCall(function()
-        vehicle.chunk = destChunk
-    end)
-    if not okSetChunk then
-        return false, errSetChunk
-    end
-
-    if destChunk.vehicles then
-        local okContains, containsVehicle = tryCall(function()
-            return destChunk.vehicles:contains(vehicle)
-        end)
-        if okContains and not containsVehicle then
-            local okAdd, errAdd = tryCall(function()
-                destChunk.vehicles:add(vehicle)
-            end)
-            if not okAdd then
-                return false, errAdd
-            end
-        end
+    local okList, errList = ensureVehicleInJavaList(destChunk.vehicles, vehicle)
+    if not okList then
+        return false, errList
     end
 
     return true, nil
