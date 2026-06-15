@@ -1,0 +1,9 @@
+Sandbox_EN = {
+    Sandbox_CJSFastTravelWaypoints = "CJS Fast Travel Waypoints",
+
+    Sandbox_CJSFastTravelWaypoints_TravelTimeMultiplier = "Travel Time Multiplier",
+    Sandbox_CJSFastTravelWaypoints_TravelTimeMultiplier_tooltip = "Multiplies the in-game time advanced by vehicle fast travel. Default is 4x the original mod timing.",
+
+    Sandbox_CJSFastTravelWaypoints_DrivingXPMultiplier = "Driving XP Multiplier",
+    Sandbox_CJSFastTravelWaypoints_DrivingXPMultiplier_tooltip = "Multiplies Driving XP awarded from fast travel distance. Set to 0 to disable XP awards.",
+}

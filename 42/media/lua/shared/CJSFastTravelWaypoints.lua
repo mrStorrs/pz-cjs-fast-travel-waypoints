@@ -13,6 +13,8 @@ M.OBJECT_SPRITE = "street_decoration_01_26"
 M.DEFAULT_MAX_NAME_LENGTH = 40
 M.DEFAULT_TRAVEL_MINUTES_PER_TILE = 1 / 30
 M.DEFAULT_XP_PER_TILE = 1 / 40
+M.DEFAULT_TRAVEL_TIME_MULTIPLIER = 4.0
+M.DEFAULT_DRIVING_XP_MULTIPLIER = 1.0
 M.VEHICLE_FOOTPRINT_HALF_WIDTH = 1
 M.VEHICLE_FOOTPRINT_HALF_LENGTH = 2
 M.DEFERRED_TRAVEL_MAX_RETRIES = 500
@@ -226,14 +228,28 @@ function M.getSquareDistance(x1, y1, x2, y2)
     return math.sqrt((dx * dx) + (dy * dy))
 end
 
-local function normalizeDegrees(angle)
-    while angle > 180 do
-        angle = angle - 360
+local function getSandboxOption(key, fallback)
+    local vars = SandboxVars and SandboxVars.CJSFastTravelWaypoints
+    if vars and vars[key] ~= nil then
+        return vars[key]
     end
-    while angle <= -180 do
-        angle = angle + 360
+    return fallback
+end
+
+local function getPositiveNumberOption(key, fallback)
+    local value = tonumber(getSandboxOption(key, fallback))
+    if not value or value < 0 then
+        return fallback
     end
-    return angle
+    return value
+end
+
+function M.getTravelTimeMultiplier()
+    return getPositiveNumberOption("TravelTimeMultiplier", M.DEFAULT_TRAVEL_TIME_MULTIPLIER)
+end
+
+function M.getDrivingXpMultiplier()
+    return getPositiveNumberOption("DrivingXPMultiplier", M.DEFAULT_DRIVING_XP_MULTIPLIER)
 end
 
 function M.getWaypointVehicleDirection(waypoint)
@@ -249,13 +265,6 @@ function M.applyVehicleRotationToWaypoint(vehicle, waypoint)
         return
     end
 
-    local okCurrentDir, currentDir = tryCall(function()
-        return vehicle:getDir()
-    end)
-    if not okCurrentDir then
-        currentDir = nil
-    end
-
     local okSetDir, errSetDir = tryCall(function()
         vehicle:setDir(desiredDir)
     end)
@@ -263,28 +272,20 @@ function M.applyVehicleRotationToWaypoint(vehicle, waypoint)
         logInfo("setDir failed during travel rotation: " .. tostring(errSetDir))
     end
 
-    if currentDir then
-        local okDesiredYaw, desiredYaw = tryCall(function()
-            return desiredDir:toAngleDegrees()
+    local okDesiredYaw, desiredYaw = tryCall(function()
+        return desiredDir:toAngleDegrees()
+    end)
+    local okAngles, currentAngleX, _, currentAngleZ = tryCall(function()
+        return vehicle:getAngleX(), vehicle:getAngleY(), vehicle:getAngleZ()
+    end)
+    if okDesiredYaw and okAngles then
+        local okSetAngles, errSetAngles = tryCall(function()
+            vehicle:setAngles(currentAngleX, desiredYaw, currentAngleZ)
         end)
-        local okCurrentYaw, currentYaw = tryCall(function()
-            return currentDir:toAngleDegrees()
-        end)
-        local okAngles, currentAngleX, currentAngleY, currentAngleZ = tryCall(function()
-            return vehicle:getAngleX(), vehicle:getAngleY(), vehicle:getAngleZ()
-        end)
-        if okDesiredYaw and okCurrentYaw and okAngles then
-            local deltaYaw = desiredYaw - currentYaw
-            local nextYaw = normalizeDegrees(currentAngleY + deltaYaw)
-            local okSetAngles, errSetAngles = tryCall(function()
-                vehicle:setAngles(currentAngleX, nextYaw, currentAngleZ)
-            end)
-            if not okSetAngles then
-                logInfo("setAngles failed during travel rotation: " .. tostring(errSetAngles))
-            end
+        if not okSetAngles then
+            logInfo("setAngles failed during travel rotation: " .. tostring(errSetAngles))
         end
     end
-
 end
 
 local VEHICLE_JNI_TRANSFORM_FIELD_NAME = "public final zombie.core.physics.Transform zombie.vehicles.BaseVehicle.jniTransform"
@@ -544,7 +545,7 @@ function M.isWaypointTravelDestinationValid(waypoint, vehicle)
 end
 
 function M.getTravelMinutes(distance)
-    local minutes = math.floor((distance * M.DEFAULT_TRAVEL_MINUTES_PER_TILE) + 0.5)
+    local minutes = math.floor((distance * M.DEFAULT_TRAVEL_MINUTES_PER_TILE * M.getTravelTimeMultiplier()) + 0.5)
     if minutes < 1 then
         minutes = 1
     end
@@ -552,7 +553,12 @@ function M.getTravelMinutes(distance)
 end
 
 function M.getDrivingXp(distance)
-    local xp = math.floor((distance * M.DEFAULT_XP_PER_TILE) + 0.5)
+    local multiplier = M.getDrivingXpMultiplier()
+    if multiplier <= 0 then
+        return 0
+    end
+
+    local xp = math.floor((distance * M.DEFAULT_XP_PER_TILE * multiplier) + 0.5)
     if xp < 1 then
         xp = 1
     end
@@ -603,6 +609,9 @@ function M.awardDrivingXp(playerObj, distance)
         return
     end
     local xp = M.getDrivingXp(distance)
+    if xp <= 0 then
+        return
+    end
     playerObj:getXp():AddXP(perk, xp)
 end
 

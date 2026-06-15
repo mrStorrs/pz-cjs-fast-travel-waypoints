@@ -1,0 +1,21 @@
+VERSION = 1,
+
+option CJSFastTravelWaypoints.TravelTimeMultiplier
+{
+    type = double,
+    min = 0.0,
+    max = 100.0,
+    default = 4.0,
+    page = CJSFastTravelWaypoints,
+    translation = CJSFastTravelWaypoints_TravelTimeMultiplier,
+}
+
+option CJSFastTravelWaypoints.DrivingXPMultiplier
+{
+    type = double,
+    min = 0.0,
+    max = 100.0,
+    default = 1.0,
+    page = CJSFastTravelWaypoints,
+    translation = CJSFastTravelWaypoints_DrivingXPMultiplier,
+}
