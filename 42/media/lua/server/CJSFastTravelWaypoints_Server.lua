@@ -2,22 +2,6 @@ require "CJSFastTravelWaypoints"
 
 local M = CJSFastTravelWaypoints
 
-local function findWaypointObjectOnSquare(square, waypointId)
-    return M.getWaypointObject(square, waypointId)
-end
-
-local function updateWaypointObjectName(waypoint)
-    local square = getCell() and getCell():getGridSquare(waypoint.x, waypoint.y, waypoint.z)
-    if not square then
-        return
-    end
-
-    local object = findWaypointObjectOnSquare(square, waypoint.id)
-    if object then
-        M.writeWaypointObjectFields(object, waypoint)
-    end
-end
-
 local function handlePlaceWaypoint(playerObj, args)
     if not playerObj or not args then
         return
@@ -32,7 +16,7 @@ local function handlePlaceWaypoint(playerObj, args)
 
     local waypoint = M.placeWaypointAtSquare(x, y, z, args.north == true, args.name)
     if waypoint then
-        updateWaypointObjectName(waypoint)
+        M.updateWaypointObject(waypoint)
     end
 end
 
@@ -44,7 +28,7 @@ local function handleRenameWaypoint(playerObj, args)
     local waypointId = tostring(args.waypointId or "")
     local waypoint = M.updateWaypointName(waypointId, args.name)
     if waypoint then
-        updateWaypointObjectName(waypoint)
+        M.updateWaypointObject(waypoint)
         ModData.transmit(M.DATA_KEY)
     end
 end
@@ -60,7 +44,12 @@ local function handleTravelToWaypoint(playerObj, args)
         return
     end
 
-    M.teleportVehicleToWaypoint(playerObj, waypoint)
+    local ok, reason = M.teleportVehicleToWaypoint(playerObj, waypoint)
+    if not ok then
+        sendServerCommand(playerObj, M.MOD_ID, "TravelFailed", {
+            reason = reason,
+        })
+    end
 end
 
 local function onClientCommand(module, command, playerObj, args)

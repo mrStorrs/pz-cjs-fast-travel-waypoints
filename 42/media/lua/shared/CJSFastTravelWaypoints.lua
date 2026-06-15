@@ -13,7 +13,109 @@ M.OBJECT_SPRITE = "street_decoration_01_26"
 M.DEFAULT_MAX_NAME_LENGTH = 40
 M.DEFAULT_TRAVEL_MINUTES_PER_TILE = 1 / 30
 M.DEFAULT_XP_PER_TILE = 1 / 40
+M.VEHICLE_FOOTPRINT_HALF_WIDTH = 1
+M.VEHICLE_FOOTPRINT_HALF_LENGTH = 2
+M.DEFERRED_TRAVEL_MAX_RETRIES = 500
 M._missingDrivingPerkWarningShown = false
+M._deferredVehicleTravel = nil
+
+local function logInfo(message)
+    print("[" .. M.MOD_ID .. "] " .. tostring(message))
+end
+
+local function tryCall(fn)
+    local ok, result1, result2, result3 = pcall(fn)
+    if not ok then
+        return false, result1
+    end
+    return true, result1, result2, result3
+end
+
+local function notifyTravelFailure(reason)
+    if type(M.notifyTravelFailure) == "function" then
+        M.notifyTravelFailure(reason)
+    end
+end
+
+local function notifyTravelSuccess(waypoint, minutes, distance)
+    if type(M.notifyTravelSuccess) == "function" then
+        M.notifyTravelSuccess(waypoint, minutes, distance)
+    end
+end
+
+local function setMovingObjectPosition(object, x, y, z)
+    if not object then
+        return false, "object is unavailable"
+    end
+
+    local okSetX, errSetX = tryCall(function()
+        object:setX(x)
+    end)
+    if not okSetX then
+        return false, errSetX
+    end
+
+    local okSetY, errSetY = tryCall(function()
+        object:setY(y)
+    end)
+    if not okSetY then
+        return false, errSetY
+    end
+
+    local okSetZ, errSetZ = tryCall(function()
+        object:setZ(z)
+    end)
+    if not okSetZ then
+        return false, errSetZ
+    end
+
+    if object.setLastX then
+        tryCall(function()
+            object:setLastX(x)
+        end)
+    end
+    if object.setLastY then
+        tryCall(function()
+            object:setLastY(y)
+        end)
+    end
+    if object.setLastZ then
+        tryCall(function()
+            object:setLastZ(z)
+        end)
+    end
+
+    -- RV Interior uses setL* aliases during teleports; keep them when present for B42 camera/current-square updates.
+    if object.setLx then
+        tryCall(function()
+            object:setLx(x)
+        end)
+    end
+    if object.setLy then
+        tryCall(function()
+            object:setLy(y)
+        end)
+    end
+    if object.setLz then
+        tryCall(function()
+            object:setLz(z)
+        end)
+    end
+
+    if object.setCurrentSquareFromPosition then
+        tryCall(function()
+            object:setCurrentSquareFromPosition(x, y, z)
+        end)
+    end
+
+    if object.ensureOnTile then
+        tryCall(function()
+            object:ensureOnTile()
+        end)
+    end
+
+    return true, nil
+end
 
 local function trim(text)
     if type(text) ~= "string" then
@@ -124,6 +226,323 @@ function M.getSquareDistance(x1, y1, x2, y2)
     return math.sqrt((dx * dx) + (dy * dy))
 end
 
+local function normalizeDegrees(angle)
+    while angle > 180 do
+        angle = angle - 360
+    end
+    while angle <= -180 do
+        angle = angle + 360
+    end
+    return angle
+end
+
+function M.getWaypointVehicleDirection(waypoint)
+    if not waypoint or not IsoDirections then
+        return nil
+    end
+    return waypoint.north and IsoDirections.N or IsoDirections.W
+end
+
+function M.applyVehicleRotationToWaypoint(vehicle, waypoint)
+    local desiredDir = M.getWaypointVehicleDirection(waypoint)
+    if not vehicle or not desiredDir then
+        return
+    end
+
+    local okCurrentDir, currentDir = tryCall(function()
+        return vehicle:getDir()
+    end)
+    if not okCurrentDir then
+        currentDir = nil
+    end
+
+    local okSetDir, errSetDir = tryCall(function()
+        vehicle:setDir(desiredDir)
+    end)
+    if not okSetDir then
+        logInfo("setDir failed during travel rotation: " .. tostring(errSetDir))
+    end
+
+    if currentDir then
+        local okDesiredYaw, desiredYaw = tryCall(function()
+            return desiredDir:toAngleDegrees()
+        end)
+        local okCurrentYaw, currentYaw = tryCall(function()
+            return currentDir:toAngleDegrees()
+        end)
+        local okAngles, currentAngleX, currentAngleY, currentAngleZ = tryCall(function()
+            return vehicle:getAngleX(), vehicle:getAngleY(), vehicle:getAngleZ()
+        end)
+        if okDesiredYaw and okCurrentYaw and okAngles then
+            local deltaYaw = desiredYaw - currentYaw
+            local nextYaw = normalizeDegrees(currentAngleY + deltaYaw)
+            local okSetAngles, errSetAngles = tryCall(function()
+                vehicle:setAngles(currentAngleX, nextYaw, currentAngleZ)
+            end)
+            if not okSetAngles then
+                logInfo("setAngles failed during travel rotation: " .. tostring(errSetAngles))
+            end
+        end
+    end
+
+end
+
+local VEHICLE_JNI_TRANSFORM_FIELD_NAME = "public final zombie.core.physics.Transform zombie.vehicles.BaseVehicle.jniTransform"
+local TRANSFORM_ORIGIN_FIELD_NAME = "public final org.joml.Vector3f zombie.core.physics.Transform.origin"
+local cachedVehicleTransformField = nil
+local cachedTransformOriginField = nil
+
+local function findReflectedField(object, expectedFieldName, fallbackIndex)
+    if not getNumClassFields or not getClassField then
+        return false, "reflection helpers are unavailable"
+    end
+
+    local okCount, fieldCount = tryCall(function()
+        return getNumClassFields(object)
+    end)
+    if okCount and type(fieldCount) == "number" then
+        for i = 0, fieldCount - 1 do
+            local okField, field = tryCall(function()
+                return getClassField(object, i)
+            end)
+            if okField and field and tostring(field) == expectedFieldName then
+                return true, field
+            end
+        end
+    end
+
+    if fallbackIndex ~= nil then
+        local okFallback, field = tryCall(function()
+            return getClassField(object, fallbackIndex)
+        end)
+        if okFallback and field then
+            return true, field
+        end
+    end
+
+    return false, "field not found: " .. tostring(expectedFieldName)
+end
+
+local function getReflectedFieldValue(object, field, fieldName)
+    if not getClassFieldVal then
+        return false, "getClassFieldVal helper is unavailable"
+    end
+
+    local okValue, value = tryCall(function()
+        return getClassFieldVal(object, field)
+    end)
+    if not okValue or value == "<private>" then
+        return false, "getClassFieldVal failed for " .. tostring(fieldName) .. ": " .. tostring(value)
+    end
+
+    return true, value
+end
+
+local function setVehicleWorldTransformPosition(vehicle, destX, destY)
+    if not vehicle then
+        return false, "vehicle is unavailable"
+    end
+
+    if not cachedVehicleTransformField then
+        local okField, field = findReflectedField(vehicle, VEHICLE_JNI_TRANSFORM_FIELD_NAME)
+        if not okField then
+            return false, field
+        end
+        cachedVehicleTransformField = field
+    end
+
+    local okTransform, transform = getReflectedFieldValue(vehicle, cachedVehicleTransformField, "BaseVehicle.jniTransform")
+    if not okTransform then
+        return false, transform
+    end
+
+    local okWorldTransform, worldTransform = tryCall(function()
+        return vehicle:getWorldTransform(transform)
+    end)
+    if not okWorldTransform then
+        return false, worldTransform
+    end
+
+    if not cachedTransformOriginField then
+        local okField, field = findReflectedField(worldTransform, TRANSFORM_ORIGIN_FIELD_NAME, 1)
+        if not okField then
+            return false, field
+        end
+        cachedTransformOriginField = field
+    end
+
+    local okOrigin, origin = getReflectedFieldValue(worldTransform, cachedTransformOriginField, "Transform.origin")
+    if not okOrigin then
+        return false, origin
+    end
+
+    local deltaX = destX - vehicle:getX()
+    local deltaY = destY - vehicle:getY()
+
+    local okSetOrigin, errSetOrigin = tryCall(function()
+        origin:set(origin:x() + deltaX, origin:y(), origin:z() + deltaY)
+    end)
+    if not okSetOrigin then
+        return false, errSetOrigin
+    end
+
+    local okSetWorldTransform, errSetWorldTransform = tryCall(function()
+        vehicle:setWorldTransform(worldTransform)
+    end)
+
+    return okSetWorldTransform, errSetWorldTransform
+end
+
+local function getFootprintRanges(north)
+    if north then
+        return -M.VEHICLE_FOOTPRINT_HALF_WIDTH, M.VEHICLE_FOOTPRINT_HALF_WIDTH, -M.VEHICLE_FOOTPRINT_HALF_LENGTH, M.VEHICLE_FOOTPRINT_HALF_LENGTH
+    end
+    return -M.VEHICLE_FOOTPRINT_HALF_LENGTH, M.VEHICLE_FOOTPRINT_HALF_LENGTH, -M.VEHICLE_FOOTPRINT_HALF_WIDTH, M.VEHICLE_FOOTPRINT_HALF_WIDTH
+end
+
+function M.forEachWaypointFootprint(x, y, z, north, callback)
+    local minX, maxX, minY, maxY = getFootprintRanges(north)
+    for dx = minX, maxX do
+        for dy = minY, maxY do
+            callback(x + dx, y + dy, z, dx, dy)
+        end
+    end
+end
+
+function M.preloadWaypointDestination(waypoint)
+    if not waypoint or not MapObjects then
+        return false
+    end
+
+    local loaded = false
+    local seenSquares = {}
+    local seenChunks = {}
+
+    M.forEachWaypointFootprint(waypoint.x, waypoint.y, waypoint.z, waypoint.north, function(tx, ty, tz)
+        local squareKey = tostring(tx) .. ":" .. tostring(ty) .. ":" .. tostring(tz)
+        if MapObjects.debugLoadSquare and not seenSquares[squareKey] then
+            seenSquares[squareKey] = true
+            local ok = pcall(MapObjects.debugLoadSquare, tx, ty, tz)
+            loaded = ok or loaded
+        end
+
+        local chunkX = math.floor(tx / 10)
+        local chunkY = math.floor(ty / 10)
+        local chunkKey = tostring(chunkX) .. ":" .. tostring(chunkY)
+        if MapObjects.debugLoadChunk and not seenChunks[chunkKey] then
+            seenChunks[chunkKey] = true
+            local ok = pcall(MapObjects.debugLoadChunk, chunkX, chunkY)
+            loaded = ok or loaded
+        end
+    end)
+
+    return loaded
+end
+
+local function isOutdoorVehicleSquare(square, allowedVehicle)
+    local occupyingVehicle = square and square.getVehicleContainer and square:getVehicleContainer() or nil
+    return square
+        and square.TreatAsSolidFloor
+        and square:TreatAsSolidFloor()
+        and square.getRoom
+        and square:getRoom() == nil
+        and (not square.getVehicleContainer or not occupyingVehicle or occupyingVehicle == allowedVehicle)
+end
+
+local function squareContainsAllowedVehicle(square, allowedVehicle)
+    if not square or not allowedVehicle or not square.getVehicleContainer then
+        return false
+    end
+    return square:getVehicleContainer() == allowedVehicle
+end
+
+local function squareHasForeignBlockingObjects(square, waypointId)
+    if not square or not square.getObjects then
+        return true
+    end
+
+    local floor = square.getFloor and square:getFloor() or nil
+    local objects = square:getObjects()
+    for i = 0, objects:size() - 1 do
+        local object = objects:get(i)
+        if object and object ~= floor then
+            if M.isWaypointObject(object) then
+                local md = object:getModData()
+                if tostring(md.waypointId) ~= tostring(waypointId) then
+                    return true
+                end
+            else
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+function M.isWaypointPlacementSquareValid(square, north)
+    if not square then
+        return false
+    end
+
+    local x = square:getX()
+    local y = square:getY()
+    local z = square:getZ()
+    if M.findWaypointAtSquare(x, y, z) then
+        return false
+    end
+
+    local cell = square:getCell()
+    local valid = true
+    M.forEachWaypointFootprint(x, y, z, north, function(tx, ty, tz)
+        local testSquare = cell:getGridSquare(tx, ty, tz)
+        if not testSquare
+            or not isOutdoorVehicleSquare(testSquare)
+            or not testSquare.isFree
+            or not testSquare:isFree(false) then
+            valid = false
+        end
+    end)
+    return valid
+end
+
+function M.isWaypointTravelDestinationValid(waypoint, vehicle)
+    if not waypoint then
+        return false
+    end
+
+    M.preloadWaypointDestination(waypoint)
+
+    local cell = getCell()
+    local square = cell and cell:getGridSquare(waypoint.x, waypoint.y, waypoint.z)
+    if not square then
+        return false
+    end
+
+    local valid = true
+    M.forEachWaypointFootprint(waypoint.x, waypoint.y, waypoint.z, waypoint.north, function(tx, ty, tz, dx, dy)
+        if not valid then
+            return
+        end
+
+        local testSquare = cell:getGridSquare(tx, ty, tz)
+        local occupiedByTravelVehicle = squareContainsAllowedVehicle(testSquare, vehicle)
+        if not testSquare or not isOutdoorVehicleSquare(testSquare, vehicle) then
+            valid = false
+            return
+        end
+
+        if dx == 0 and dy == 0 then
+            if testSquare.isFree and not testSquare:isFree(false) and not occupiedByTravelVehicle and squareHasForeignBlockingObjects(testSquare, waypoint.id) then
+                valid = false
+            end
+        elseif (not testSquare.isFree or not testSquare:isFree(false)) and not occupiedByTravelVehicle then
+            valid = false
+        end
+    end)
+    return valid
+end
+
 function M.getTravelMinutes(distance)
     local minutes = math.floor((distance * M.DEFAULT_TRAVEL_MINUTES_PER_TILE) + 0.5)
     if minutes < 1 then
@@ -148,7 +567,7 @@ function M.getDrivingPerk()
         return PerkFactory.Perks.Driving
     end
     if not M._missingDrivingPerkWarningShown then
-        print("[cjsFastTravelWaypoints] Driving perk not found. Travel XP will be skipped until a compatible driving skill mod exposes Perks.Driving.")
+        logInfo("Driving perk not found. Travel XP will be skipped until a compatible driving skill mod exposes Perks.Driving.")
         M._missingDrivingPerkWarningShown = true
     end
     return nil
@@ -255,6 +674,9 @@ function M.writeWaypointObjectFields(object, waypoint)
     if object.setName then
         object:setName(waypoint.name)
     end
+    if object.setDir and IsoDirections then
+        object:setDir(waypoint.north and IsoDirections.N or IsoDirections.W)
+    end
     if object.transmitModData then
         object:transmitModData()
     end
@@ -285,14 +707,34 @@ function M.placeWaypointAtSquare(x, y, z, north, name)
         return nil, "missing-square"
     end
 
-    if M.findWaypointAtSquare(math.floor(x), math.floor(y), math.floor(z)) then
-        return nil, "occupied"
+    if not M.isWaypointPlacementSquareValid(square, north) then
+        return nil, "invalid-location"
     end
 
     local waypoint = M.createWaypointRecord(x, y, z, north, name)
     M.createWaypointObject(square, waypoint)
     ModData.transmit(M.DATA_KEY)
     return waypoint
+end
+
+function M.updateWaypointObject(waypoint)
+    if not waypoint then
+        return nil
+    end
+
+    local cell = getCell()
+    local square = cell and cell:getGridSquare(waypoint.x, waypoint.y, waypoint.z)
+    if not square then
+        return nil
+    end
+
+    local object = M.getWaypointObject(square, waypoint.id)
+    if object then
+        M.writeWaypointObjectFields(object, waypoint)
+        return object
+    end
+
+    return M.createWaypointObject(square, waypoint)
 end
 
 local function findFreeAdjacentSquare(square)
@@ -318,6 +760,736 @@ local function findFreeAdjacentSquare(square)
     return square
 end
 
+local function getDeferredPlayerStagingPosition(waypoint)
+    local _, maxX = getFootprintRanges(waypoint.north)
+    return waypoint.x + maxX + 2.5, waypoint.y + 0.5, waypoint.z
+end
+
+local function isVehicleRemovedFromWorld(vehicle)
+    if not vehicle or not vehicle.isRemovedFromWorld then
+        return false
+    end
+
+    local okRemoved, removed = tryCall(function()
+        return vehicle:isRemovedFromWorld()
+    end)
+    return okRemoved and removed == true
+end
+
+local function getVehicleRuntimeId(vehicle)
+    if not vehicle or not vehicle.getId then
+        return nil
+    end
+
+    local okId, vehicleId = tryCall(function()
+        return vehicle:getId()
+    end)
+    if okId then
+        return vehicleId
+    end
+    return nil
+end
+
+local function getVehicleSqlId(vehicle)
+    if not vehicle or not vehicle.getSqlId then
+        return nil
+    end
+
+    local okId, vehicleId = tryCall(function()
+        return vehicle:getSqlId()
+    end)
+    if okId and vehicleId and tonumber(vehicleId) and tonumber(vehicleId) >= 1 then
+        return vehicleId
+    end
+    return nil
+end
+
+local function resolveDeferredVehicle(state)
+    if not state then
+        return nil
+    end
+
+    if state.vehicle and not isVehicleRemovedFromWorld(state.vehicle) then
+        return state.vehicle
+    end
+
+    if state.vehicleId == nil and state.vehicleSqlId == nil then
+        return state.vehicle
+    end
+
+    local cell = getCell()
+    local vehicles = cell and cell.getVehicles and cell:getVehicles() or nil
+    if not vehicles then
+        return state.vehicle
+    end
+
+    for i = 0, vehicles:size() - 1 do
+        local vehicle = vehicles:get(i)
+        local runtimeMatches = state.vehicleId ~= nil and tostring(getVehicleRuntimeId(vehicle)) == tostring(state.vehicleId)
+        local sqlMatches = state.vehicleSqlId ~= nil and tostring(getVehicleSqlId(vehicle)) == tostring(state.vehicleSqlId)
+        if vehicle and (runtimeMatches or sqlMatches) then
+            state.vehicle = vehicle
+            return vehicle
+        end
+    end
+
+    return state.vehicle
+end
+
+local function getVehicleSeat(vehicle, playerObj)
+    if not vehicle or not playerObj or not vehicle.getSeat then
+        return 0
+    end
+
+    local okSeat, seat = tryCall(function()
+        return vehicle:getSeat(playerObj)
+    end)
+    if okSeat and type(seat) == "number" and seat >= 0 then
+        return seat
+    end
+    return 0
+end
+
+local function exitPlayerVehicleForDeferredTravel(vehicle, playerObj)
+    if not vehicle or not playerObj then
+        return false, "vehicle or player unavailable"
+    end
+
+    local okExit, didExit = tryCall(function()
+        return vehicle:exit(playerObj)
+    end)
+    if not okExit or didExit == false then
+        return false, didExit
+    end
+
+    if triggerEvent then
+        tryCall(function()
+            triggerEvent("OnExitVehicle", playerObj)
+        end)
+    end
+
+    if getPlayerVehicleDashboard and playerObj.getPlayerNum then
+        tryCall(function()
+            getPlayerVehicleDashboard(playerObj:getPlayerNum()):setVehicle(nil)
+        end)
+    end
+
+    return true, nil
+end
+
+local function enterPlayerVehicleSeat(vehicle, playerObj, seat)
+    if not vehicle or not playerObj then
+        return false, "vehicle or player unavailable"
+    end
+
+    if isVehicleRemovedFromWorld(vehicle) then
+        return false, "vehicle was unloaded"
+    end
+
+    seat = tonumber(seat) or 0
+    if vehicle.isSeatInstalled then
+        local okInstalled, installed = tryCall(function()
+            return vehicle:isSeatInstalled(seat)
+        end)
+        if okInstalled and installed == false then
+            seat = 0
+        end
+    end
+
+    local entered = false
+    local enterError = nil
+    local okPosition, position = tryCall(function()
+        return vehicle:getPassengerPosition(seat, "inside")
+    end)
+    if okPosition and position and position.getOffset and position:getOffset() then
+        local okEnter, result = tryCall(function()
+            return vehicle:enter(seat, playerObj, position:getOffset())
+        end)
+        entered = okEnter and result ~= false
+        enterError = result
+    end
+
+    if not entered then
+        local okEnter, result = tryCall(function()
+            return vehicle:enter(seat, playerObj)
+        end)
+        entered = okEnter and result ~= false
+        enterError = result
+    end
+
+    if not entered then
+        return false, enterError
+    end
+
+    if vehicle.setCharacterPosition then
+        tryCall(function()
+            vehicle:setCharacterPosition(playerObj, seat, "inside")
+        end)
+    end
+    if vehicle.switchSeat then
+        tryCall(function()
+            vehicle:switchSeat(playerObj, seat)
+        end)
+    end
+    if sendSwitchSeat then
+        tryCall(function()
+            sendSwitchSeat(vehicle, playerObj, 0, seat)
+        end)
+    end
+    if triggerEvent then
+        tryCall(function()
+            triggerEvent("OnEnterVehicle", playerObj)
+        end)
+        tryCall(function()
+            triggerEvent("OnSwitchVehicleSeat", playerObj)
+        end)
+    end
+
+    return true, nil
+end
+
+local function restoreDeferredPlayerToVehicle(state, vehicle)
+    if not state or not state.playerObj then
+        return
+    end
+
+    if vehicle and not isVehicleRemovedFromWorld(vehicle) then
+        tryCall(function()
+            vehicle:setPhysicsActive(true)
+        end)
+        setMovingObjectPosition(state.playerObj, vehicle:getX(), vehicle:getY(), vehicle:getZ())
+        enterPlayerVehicleSeat(vehicle, state.playerObj, state.seat)
+        return
+    end
+
+    setMovingObjectPosition(state.playerObj, state.originX, state.originY, state.originZ)
+end
+
+local function removeVehicleFromJavaList(list, vehicle)
+    if not list or not vehicle or not list.size or not list.get or not list.remove then
+        return
+    end
+
+    for i = list:size() - 1, 0, -1 do
+        local okGet, item = tryCall(function()
+            return list:get(i)
+        end)
+        if okGet and item == vehicle then
+            tryCall(function()
+                list:remove(i)
+            end)
+        end
+    end
+end
+
+local function getVehicleChunk(vehicle)
+    if not vehicle then
+        return nil
+    end
+
+    if vehicle.chunk then
+        return vehicle.chunk
+    end
+
+    local square = vehicle.getSquare and vehicle:getSquare() or nil
+    if square and square.getChunk then
+        return square:getChunk()
+    end
+
+    return nil
+end
+
+local function getDeferredChunkPinMap()
+    local cell = getCell()
+    if not cell then
+        return nil, nil
+    end
+
+    for index = 1, 3 do
+        local okMap, chunkMap = tryCall(function()
+            return cell.getChunkMap and cell:getChunkMap(index) or nil
+        end)
+        local playerAtIndex = nil
+        if getSpecificPlayer then
+            local okPlayer, playerObj = tryCall(function()
+                return getSpecificPlayer(index)
+            end)
+            if okPlayer then
+                playerAtIndex = playerObj
+            end
+        end
+        if okMap and chunkMap and not playerAtIndex and chunkMap.ignore == true then
+            return chunkMap, index
+        end
+    end
+
+    return nil, nil
+end
+
+local function pinVehicleOriginChunk(vehicle)
+    local chunk = getVehicleChunk(vehicle)
+    if not chunk or not chunk.refs then
+        return nil, "missing-origin-chunk"
+    end
+
+    local pinMap, pinMapIndex = getDeferredChunkPinMap()
+    if not pinMap then
+        return nil, "missing-pin-map"
+    end
+
+    local okContains, containsPin = tryCall(function()
+        return chunk.refs:contains(pinMap)
+    end)
+    if not okContains then
+        return nil, containsPin
+    end
+
+    local added = false
+    if not containsPin then
+        local okAdd, errAdd = tryCall(function()
+            chunk.refs:add(pinMap)
+        end)
+        if not okAdd then
+            return nil, errAdd
+        end
+        added = true
+    end
+
+    logInfo(string.format(
+        "Pinned origin chunk (%s, %s) with spare chunk map %s for deferred vehicle travel.",
+        tostring(chunk.wx),
+        tostring(chunk.wy),
+        tostring(pinMapIndex)
+    ))
+
+    return {
+        chunk = chunk,
+        pinMap = pinMap,
+        pinMapIndex = pinMapIndex,
+        added = added,
+        wx = chunk.wx,
+        wy = chunk.wy,
+    }, nil
+end
+
+local function releaseDeferredChunkPin(state)
+    local pin = state and state.originChunkPin or nil
+    if not pin or not pin.chunk or not pin.pinMap then
+        return
+    end
+    state.originChunkPin = nil
+
+    local chunk = pin.chunk
+    if chunk.refs and pin.added then
+        tryCall(function()
+            if chunk.refs:contains(pin.pinMap) then
+                chunk.refs:remove(pin.pinMap)
+            end
+        end)
+    end
+
+    local refsEmpty = false
+    if chunk.refs then
+        local okEmpty, empty = tryCall(function()
+            return chunk.refs:isEmpty()
+        end)
+        refsEmpty = okEmpty and empty == true
+    end
+
+    if refsEmpty then
+        local sharedKey = (tonumber(pin.wx) or 0) * 65536 + (tonumber(pin.wy) or 0)
+        if IsoChunkMap and IsoChunkMap.SharedChunks and IsoChunkMap.SharedChunks.remove then
+            tryCall(function()
+                IsoChunkMap.SharedChunks:remove(sharedKey)
+            end)
+        end
+        tryCall(function()
+            chunk:removeFromWorld()
+        end)
+        if ChunkSaveWorker and ChunkSaveWorker.instance and ChunkSaveWorker.instance.Add then
+            tryCall(function()
+                ChunkSaveWorker.instance:Add(chunk)
+            end)
+        end
+    end
+
+    logInfo(string.format(
+        "Released deferred travel pin for origin chunk (%s, %s); refsEmpty=%s.",
+        tostring(pin.wx),
+        tostring(pin.wy),
+        tostring(refsEmpty)
+    ))
+end
+
+local function ensureVehicleChunkMatchesSquare(vehicle, square)
+    if not vehicle or not square or not square.getChunk then
+        return false, "invalid-args"
+    end
+
+    local destChunk = square:getChunk()
+    if not destChunk then
+        return false, "missing-destination-chunk"
+    end
+
+    local originChunk = getVehicleChunk(vehicle)
+    if originChunk and originChunk ~= destChunk then
+        removeVehicleFromJavaList(originChunk.vehicles, vehicle)
+    end
+
+    local okSetChunk, errSetChunk = tryCall(function()
+        vehicle.chunk = destChunk
+    end)
+    if not okSetChunk then
+        return false, errSetChunk
+    end
+
+    if destChunk.vehicles then
+        local okContains, containsVehicle = tryCall(function()
+            return destChunk.vehicles:contains(vehicle)
+        end)
+        if okContains and not containsVehicle then
+            local okAdd, errAdd = tryCall(function()
+                destChunk.vehicles:add(vehicle)
+            end)
+            if not okAdd then
+                return false, errAdd
+            end
+        end
+    end
+
+    return true, nil
+end
+
+local function moveVehicleToLoadedWaypoint(vehicle, waypoint)
+    if not vehicle or not waypoint then
+        return false, "invalid-args"
+    end
+
+    local cell = getCell()
+    local square = cell and cell:getGridSquare(waypoint.x, waypoint.y, waypoint.z)
+    if not square then
+        return false, "missing-square"
+    end
+
+    if isVehicleRemovedFromWorld(vehicle) then
+        logInfo(string.format(
+            "Vehicle fast travel failed: captured vehicle unloaded before waypoint '%s' became available.",
+            tostring(waypoint.name or waypoint.id or "Waypoint")
+        ))
+        return false, "vehicle-unloaded"
+    end
+
+    if not M.isWaypointTravelDestinationValid(waypoint, vehicle) then
+        return false, "blocked-destination"
+    end
+
+    local destX = waypoint.x + 0.5
+    local destY = waypoint.y + 0.5
+    local destZ = waypoint.z
+
+    local okBreakConstraint, errBreakConstraint = tryCall(function()
+        vehicle:breakConstraint(true, true)
+    end)
+    if not okBreakConstraint then
+        logInfo("breakConstraint failed before travel: " .. tostring(errBreakConstraint))
+    end
+
+    local function failVehicleMove(step, err)
+        logInfo("Vehicle fast travel failed during " .. tostring(step) .. ": " .. tostring(err))
+        local okPhysicsOn, errPhysicsOn = tryCall(function()
+            vehicle:setPhysicsActive(true)
+        end)
+        if not okPhysicsOn then
+            logInfo("setPhysicsActive(true) failed during rollback: " .. tostring(errPhysicsOn))
+        end
+        return false, "vehicle-move-error"
+    end
+
+    local okPhysicsOff, errPhysicsOff = tryCall(function()
+        vehicle:setPhysicsActive(false)
+    end)
+    if not okPhysicsOff then
+        logInfo("setPhysicsActive(false) failed before travel: " .. tostring(errPhysicsOff))
+    end
+
+    local okTransform, errTransform = setVehicleWorldTransformPosition(vehicle, destX, destY)
+    if not okTransform then
+        return failVehicleMove("setWorldTransform", errTransform)
+    end
+
+    local okPosition, errPosition = setMovingObjectPosition(vehicle, destX, destY, destZ)
+    if not okPosition then
+        return failVehicleMove("setMovingObjectPosition", errPosition)
+    end
+
+    if vehicle.setSquare then
+        tryCall(function()
+            vehicle:setSquare(square)
+        end)
+    end
+
+    M.applyVehicleRotationToWaypoint(vehicle, waypoint)
+
+    local okSquare, errSquare = tryCall(function()
+        vehicle:setCurrentSquareFromPosition(destX, destY, destZ)
+    end)
+    if not okSquare then
+        logInfo("setCurrentSquareFromPosition failed after travel: " .. tostring(errSquare))
+    end
+
+    local okChunk, errChunk = ensureVehicleChunkMatchesSquare(vehicle, square)
+    if not okChunk then
+        return failVehicleMove("vehicle chunk reattach", errChunk)
+    end
+
+    if isClient() then
+        pcall(vehicle.update, vehicle)
+        pcall(vehicle.updateControls, vehicle)
+        pcall(vehicle.updateBulletStats, vehicle)
+        pcall(vehicle.updatePhysics, vehicle)
+        pcall(vehicle.updatePhysicsNetwork, vehicle)
+    end
+
+    local okPhysicsOn, errPhysicsOn = tryCall(function()
+        vehicle:setPhysicsActive(true)
+    end)
+    if not okPhysicsOn then
+        logInfo("setPhysicsActive(true) failed after travel: " .. tostring(errPhysicsOn))
+    end
+
+    if VehiclesDB2 and VehiclesDB2.instance and VehiclesDB2.instance.updateVehicleAndTrailer then
+        VehiclesDB2.instance:updateVehicleAndTrailer(vehicle)
+    end
+
+    local finalX = vehicle:getX()
+    local finalY = vehicle:getY()
+    local finalZ = vehicle:getZ()
+    local finalDelta = M.getSquareDistance(finalX, finalY, destX, destY)
+    local finalSquare = cell:getGridSquare(finalX, finalY, finalZ)
+    if finalDelta > 1.5 or not finalSquare then
+        logInfo(string.format(
+            "Vehicle relocation did not stick. target=(%.2f, %.2f, %.2f) actual=(%.2f, %.2f, %.2f) delta=%.2f finalSquare=%s",
+            destX,
+            destY,
+            destZ,
+            finalX,
+            finalY,
+            finalZ,
+            finalDelta,
+            tostring(finalSquare ~= nil)
+        ))
+        return false, "vehicle-move-stuck"
+    end
+
+    return true, nil, destX, destY, destZ, finalX, finalY, finalZ
+end
+
+local function finishSuccessfulTravel(playerObj, waypoint, minutes, distance, destX, destY, destZ, finalX, finalY, finalZ)
+    logInfo(string.format(
+        "Vehicle relocated to waypoint '%s'. target=(%.2f, %.2f, %.2f) actual=(%.2f, %.2f, %.2f) minutes=%d distance=%.2f",
+        tostring(waypoint.name or waypoint.id or "Waypoint"),
+        destX,
+        destY,
+        destZ,
+        finalX,
+        finalY,
+        finalZ,
+        minutes,
+        distance
+    ))
+
+    M.advanceGameTimeByMinutes(minutes)
+    M.awardDrivingXp(playerObj, distance)
+    if ModData and type(ModData.transmit) == "function" then
+        ModData.transmit(M.DATA_KEY)
+    end
+end
+
+local function clearDeferredVehicleTravel(state)
+    if state and state.callback and Events and Events.OnPlayerUpdate then
+        Events.OnPlayerUpdate.Remove(state.callback)
+    end
+    if state and state.deferChunkPinRelease then
+        logInfo("Deferred travel kept the origin chunk pinned after failure to avoid unloading the restored vehicle.")
+    else
+        releaseDeferredChunkPin(state)
+    end
+    if M._deferredVehicleTravel == state then
+        M._deferredVehicleTravel = nil
+    end
+end
+
+function M.processDeferredVehicleTravel()
+    local state = M._deferredVehicleTravel
+    if not state then
+        return
+    end
+
+    local playerObj = state.playerObj
+    local waypoint = state.waypoint
+    if not playerObj or not waypoint then
+        clearDeferredVehicleTravel(state)
+        notifyTravelFailure("invalid-args")
+        return
+    end
+
+    local cell = getCell()
+    local square = cell and cell:getGridSquare(waypoint.x, waypoint.y, waypoint.z)
+    if not playerObj:getCurrentSquare() or not square then
+        state.retries = state.retries - 1
+        if state.retries <= 0 then
+            local vehicle = resolveDeferredVehicle(state)
+            state.deferChunkPinRelease = true
+            restoreDeferredPlayerToVehicle(state, vehicle)
+            clearDeferredVehicleTravel(state)
+            logInfo(string.format(
+                "Deferred vehicle travel timed out waiting for waypoint '%s' at (%d, %d, %d).",
+                tostring(waypoint.name or waypoint.id or "Waypoint"),
+                waypoint.x,
+                waypoint.y,
+                waypoint.z
+            ))
+            notifyTravelFailure("missing-square")
+        end
+        return
+    end
+
+    local vehicle = resolveDeferredVehicle(state)
+    if not vehicle or isVehicleRemovedFromWorld(vehicle) then
+        if not state.waitingForVehicleLogged then
+            state.waitingForVehicleLogged = true
+            logInfo("Deferred vehicle travel is waiting for the pinned source vehicle object to remain available.")
+        end
+        state.retries = state.retries - 1
+        if state.retries <= 0 then
+            state.deferChunkPinRelease = true
+            restoreDeferredPlayerToVehicle(state, vehicle)
+            clearDeferredVehicleTravel(state)
+            logInfo("Deferred vehicle travel failed: destination loaded but the pinned source vehicle was unavailable.")
+            notifyTravelFailure("vehicle-unloaded")
+        end
+        return
+    end
+
+    local okMove, reason, destX, destY, destZ, finalX, finalY, finalZ = moveVehicleToLoadedWaypoint(vehicle, waypoint)
+    if not okMove then
+        state.deferChunkPinRelease = true
+        restoreDeferredPlayerToVehicle(state, vehicle)
+        clearDeferredVehicleTravel(state)
+        notifyTravelFailure(reason)
+        return
+    end
+
+    local okEnter, errEnter = enterPlayerVehicleSeat(vehicle, playerObj, state.seat)
+    if not okEnter then
+        local fallbackSquare = findFreeAdjacentSquare(square)
+        if fallbackSquare then
+            setMovingObjectPosition(playerObj, fallbackSquare:getX() + 0.5, fallbackSquare:getY() + 0.5, fallbackSquare:getZ())
+        end
+        clearDeferredVehicleTravel(state)
+        logInfo(string.format(
+            "Vehicle relocated to waypoint '%s' but player re-entry failed: %s",
+            tostring(waypoint.name or waypoint.id or "Waypoint"),
+            tostring(errEnter)
+        ))
+        notifyTravelFailure("vehicle-reentry-error")
+        return
+    end
+
+    finishSuccessfulTravel(playerObj, waypoint, state.minutes, state.distance, destX, destY, destZ, finalX, finalY, finalZ)
+    clearDeferredVehicleTravel(state)
+    notifyTravelSuccess(waypoint, state.minutes, state.distance)
+end
+
+function M.startDeferredVehicleTravel(playerObj, vehicle, waypoint, distance, minutes)
+    if isClient() or isServer() then
+        return false, "missing-square"
+    end
+
+    if M._deferredVehicleTravel then
+        return false, "travel-in-progress"
+    end
+
+    local seat = getVehicleSeat(vehicle, playerObj)
+    local originX = playerObj:getX()
+    local originY = playerObj:getY()
+    local originZ = playerObj:getZ()
+    local stagingX, stagingY, stagingZ = getDeferredPlayerStagingPosition(waypoint)
+    local okExit, errExit = exitPlayerVehicleForDeferredTravel(vehicle, playerObj)
+    if not okExit then
+        logInfo("Deferred vehicle travel could not exit player from vehicle: " .. tostring(errExit))
+        return false, "vehicle-move-error"
+    end
+
+    local state = {
+        playerObj = playerObj,
+        vehicle = vehicle,
+        vehicleId = getVehicleRuntimeId(vehicle),
+        vehicleSqlId = getVehicleSqlId(vehicle),
+        waypoint = waypoint,
+        seat = seat,
+        originX = originX,
+        originY = originY,
+        originZ = originZ,
+        distance = distance,
+        minutes = minutes,
+        retries = M.DEFERRED_TRAVEL_MAX_RETRIES,
+    }
+
+    local originChunkPin, pinReason = pinVehicleOriginChunk(vehicle)
+    if not originChunkPin then
+        enterPlayerVehicleSeat(vehicle, playerObj, seat)
+        logInfo("Deferred vehicle travel could not pin origin chunk: " .. tostring(pinReason))
+        return false, "vehicle-chunk-pin-error"
+    end
+    state.originChunkPin = originChunkPin
+
+    local okBreakConstraint, errBreakConstraint = tryCall(function()
+        vehicle:breakConstraint(true, true)
+    end)
+    if not okBreakConstraint then
+        logInfo("breakConstraint failed before deferred travel staging: " .. tostring(errBreakConstraint))
+    end
+
+    local okPhysicsOff, errPhysicsOff = tryCall(function()
+        vehicle:setPhysicsActive(false)
+    end)
+    if not okPhysicsOff then
+        logInfo("setPhysicsActive(false) failed before deferred travel staging: " .. tostring(errPhysicsOff))
+    end
+
+    local okPlayerMove, errPlayerMove = setMovingObjectPosition(playerObj, stagingX, stagingY, stagingZ)
+    if not okPlayerMove then
+        tryCall(function()
+            vehicle:setPhysicsActive(true)
+        end)
+        enterPlayerVehicleSeat(vehicle, playerObj, seat)
+        releaseDeferredChunkPin(state)
+        logInfo("Deferred vehicle travel could not stage player at destination with origin chunk pinned: " .. tostring(errPlayerMove))
+        return false, "vehicle-move-error"
+    end
+
+    state.callback = function()
+        M.processDeferredVehicleTravel()
+    end
+
+    M._deferredVehicleTravel = state
+    Events.OnPlayerUpdate.Add(state.callback)
+
+    logInfo(string.format(
+        "Deferred vehicle travel started for waypoint '%s'. staging=(%.2f, %.2f, %.2f) target=(%.2f, %.2f, %.2f) distance=%.2f",
+        tostring(waypoint.name or waypoint.id or "Waypoint"),
+        stagingX,
+        stagingY,
+        stagingZ,
+        waypoint.x + 0.5,
+        waypoint.y + 0.5,
+        waypoint.z,
+        distance
+    ))
+    return true, "travel-pending", 0, distance
+end
+
 function M.teleportVehicleToWaypoint(playerObj, waypoint)
     if not playerObj or not waypoint then
         return false, "invalid-args"
@@ -328,54 +1500,44 @@ function M.teleportVehicleToWaypoint(playerObj, waypoint)
         return false, "not-in-vehicle"
     end
 
+    local distance = M.getSquareDistance(playerObj:getX(), playerObj:getY(), waypoint.x, waypoint.y)
+    local minutes = M.getTravelMinutes(distance)
+
+    if distance < 0.25 then
+        return false, "already-there"
+    end
+
+    M.preloadWaypointDestination(waypoint)
+
     local cell = getCell()
     local square = cell and cell:getGridSquare(waypoint.x, waypoint.y, waypoint.z)
     if not square then
-        return false, "missing-square"
+        return M.startDeferredVehicleTravel(playerObj, vehicle, waypoint, distance, minutes)
     end
 
-    local destX = waypoint.x + 0.5
-    local destY = waypoint.y + 0.5
-    local destZ = waypoint.z
-    local distance = M.getSquareDistance(playerObj:getX(), playerObj:getY(), waypoint.x, waypoint.y)
-
-    if vehicle.breakConstraint then
-        vehicle:breakConstraint(true, true)
-    end
-
-    vehicle:setX(destX)
-    vehicle:setY(destY)
-    vehicle:setZ(destZ)
-    vehicle:setLastX(destX)
-    vehicle:setLastY(destY)
-    if vehicle.setCurrentSquareFromPosition then
-        vehicle:setCurrentSquareFromPosition(destX, destY, destZ)
-    end
-
-    if VehiclesDB2 and VehiclesDB2.instance and VehiclesDB2.instance.updateVehicleAndTrailer then
-        VehiclesDB2.instance:updateVehicleAndTrailer(vehicle)
+    local okMove, reason, destX, destY, destZ, finalX, finalY, finalZ = moveVehicleToLoadedWaypoint(vehicle, waypoint)
+    if not okMove then
+        return false, reason
     end
 
     local playerVehicle = playerObj:getVehicle()
     if playerVehicle ~= vehicle then
-        local fallbackSquare = findFreeAdjacentSquare(square)
-        local px = fallbackSquare:getX() + 0.5
-        local py = fallbackSquare:getY() + 0.5
-        local pz = fallbackSquare:getZ()
-        playerObj:setX(px)
-        playerObj:setY(py)
-        playerObj:setZ(pz)
-        if playerObj.setCurrentSquareFromPosition then
-            playerObj:setCurrentSquareFromPosition(px, py, pz)
+        if square then
+            local fallbackSquare = findFreeAdjacentSquare(square)
+            local px = fallbackSquare:getX() + 0.5
+            local py = fallbackSquare:getY() + 0.5
+            local pz = fallbackSquare:getZ()
+            playerObj:teleportTo(px, py, pz)
+        else
+            playerObj:setX(destX)
+            playerObj:setY(destY)
+            playerObj:setZ(destZ)
+            playerObj:setCurrentSquareFromPosition(destX, destY, destZ)
         end
     end
 
-    M.advanceGameTimeByMinutes(M.getTravelMinutes(distance))
-    M.awardDrivingXp(playerObj, distance)
-    if ModData and type(ModData.transmit) == "function" then
-        ModData.transmit(M.DATA_KEY)
-    end
-    return true
+    finishSuccessfulTravel(playerObj, waypoint, minutes, distance, destX, destY, destZ, finalX, finalY, finalZ)
+    return true, nil, minutes, distance
 end
 
 if Events and Events.OnInitGlobalModData then

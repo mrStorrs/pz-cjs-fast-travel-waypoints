@@ -1,0 +1,23 @@
+module Base
+{
+    craftRecipe AssembleWaypointMarker
+    {
+        timedAction = MakingElectrical,
+        time = 120,
+        Tags = AnySurfaceCraft;Electrical,
+        category = Electrical,
+        xpAward = Electricity:5,
+        inputs
+        {
+            item 2 [Base.ElectronicsScrap] flags[NoBrokenItems],
+            item 2 [Base.ElectricWire] flags[NoBrokenItems],
+            item 1 [Base.SheetMetal] flags[NoBrokenItems],
+            item 1 [Base.Battery] mode:destroy flags[NotEmpty;ItemCount],
+            item 1 tags[Screwdriver] mode:keep flags[MayDegradeVeryLight;NoBrokenItems],
+        }
+        outputs
+        {
+            item 1 CJSFastTravelWaypoints.WaypointMarker,
+        }
+    }
+}

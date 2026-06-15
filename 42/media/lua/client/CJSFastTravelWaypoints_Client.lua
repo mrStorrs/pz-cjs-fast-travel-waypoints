@@ -9,8 +9,17 @@ require "CJSFastTravelWaypoints"
 
 local M = CJSFastTravelWaypoints
 
-local function getPlayerObj(playerNum)
-    return getSpecificPlayer(playerNum)
+local function getPlayerObj(playerRef)
+    if playerRef == nil then
+        return getSpecificPlayer(0)
+    end
+    if type(playerRef) == "number" then
+        return getSpecificPlayer(playerRef)
+    end
+    if playerRef.getPlayerNum then
+        return playerRef
+    end
+    return nil
 end
 
 local function transferItemIfNeeded(playerObj, item)
@@ -20,88 +29,149 @@ local function transferItemIfNeeded(playerObj, item)
     ISInventoryPaneContextMenu.transferIfNeeded(playerObj, item)
 end
 
-local ISWaypointPlacement = ISBuildingObject:derive("ISWaypointPlacement")
+local function showModalMessage(text)
+    local width = 420
+    local height = 140
+    local x = (getCore():getScreenWidth() - width) / 2
+    local y = (getCore():getScreenHeight() - height) / 2
+    local modal = ISModalDialog:new(x, y, width, height, text, false, nil, nil)
+    modal:initialise()
+    modal:addToUIManager()
+    modal.moveWithMouse = true
+end
 
-function ISWaypointPlacement:create(x, y, z, north, sprite)
-    local playerObj = self.character or getSpecificPlayer(self.player)
-    if not playerObj then
-        return
+local function showTravelFailure(reason)
+    local message = "Fast travel failed."
+    if reason == "blocked-destination" then
+        message = "Fast travel failed: the waypoint needs a clear outdoor vehicle footprint."
+    elseif reason == "not-in-vehicle" then
+        message = "Fast travel failed: you must be inside a vehicle."
+    elseif reason == "missing-square" then
+        message = "Fast travel failed: the destination area could not be loaded."
+    elseif reason == "already-there" then
+        message = "Fast travel skipped: you are already parked at that waypoint."
+    elseif reason == "travel-in-progress" then
+        message = "Fast travel failed: another fast travel is already in progress."
+    elseif reason == "vehicle-unloaded" then
+        message = "Fast travel failed: the vehicle unloaded before it could be moved."
+    elseif reason == "vehicle-reentry-error" then
+        message = "Fast travel moved the vehicle, but could not put you back in the seat."
+    elseif reason == "vehicle-db-move-error" then
+        message = "Fast travel failed: the vehicle could not be saved into the destination chunk."
+    elseif reason == "vehicle-chunk-pin-error" then
+        message = "Fast travel failed: the source vehicle chunk could not be kept loaded."
+    elseif reason == "vehicle-move-error" then
+        message = "Fast travel failed: vehicle relocation hit a runtime error. Check console.txt for the exact step."
+    elseif reason == "vehicle-move-stuck" then
+        message = "Fast travel failed: the vehicle did not relocate. Check console.txt for the actual coordinates."
+    end
+    showModalMessage(message)
+end
+
+local function showTravelSuccess(waypoint, minutes, distance)
+    local name = waypoint and M.getWaypointName(waypoint) or "Waypoint"
+    local message = string.format(
+        "Fast travel complete: %s\nDistance: %.1f tiles\nTime advanced: %d minute%s",
+        name,
+        distance or 0,
+        minutes or 0,
+        (minutes or 0) == 1 and "" or "s"
+    )
+    showModalMessage(message)
+end
+
+function M.notifyTravelFailure(reason)
+    showTravelFailure(reason)
+end
+
+function M.notifyTravelSuccess(waypoint, minutes, distance)
+    showTravelSuccess(waypoint, minutes, distance)
+end
+
+local ISWaypointPlacement = nil
+
+local function getWaypointPlacementClass()
+    if ISWaypointPlacement then
+        return ISWaypointPlacement
     end
 
-    if self.item then
-        transferItemIfNeeded(playerObj, self.item)
-        if playerObj:getInventory() then
-            playerObj:getInventory():Remove(self.item)
+    local baseClass = rawget(_G, "ISBuildingObject")
+    if type(baseClass) ~= "table" or type(baseClass.derive) ~= "function" then
+        return nil
+    end
+
+    local class = baseClass:derive("ISWaypointPlacement")
+
+    function class:create(x, y, z, north, sprite)
+        local playerObj = self.character or getSpecificPlayer(self.player)
+        if not playerObj then
+            return
+        end
+
+        if self.item then
+            transferItemIfNeeded(playerObj, self.item)
+            if playerObj:getInventory() then
+                playerObj:getInventory():Remove(self.item)
+            end
+        end
+
+        if isClient() then
+            sendClientCommand(playerObj, M.MOD_ID, "PlaceWaypoint", {
+                x = x,
+                y = y,
+                z = z,
+                north = not not north,
+                name = nil,
+            })
+        else
+            M.placeWaypointAtSquare(x, y, z, north, nil)
         end
     end
 
-    if isClient() then
-        sendClientCommand(playerObj, M.MOD_ID, "PlaceWaypoint", {
-            x = x,
-            y = y,
-            z = z,
-            north = not not north,
-            name = nil,
-        })
-    else
-        M.placeWaypointAtSquare(x, y, z, north, nil)
-    end
-end
-
-function ISWaypointPlacement:walkTo(x, y, z)
-    return true
-end
-
-function ISWaypointPlacement:isValid(square)
-    if not square then
-        return false
+    function class:walkTo(x, y, z)
+        return true
     end
 
-    if not square:TreatAsSolidFloor() then
-        return false
+    function class:isValid(square)
+        return M.isWaypointPlacementSquareValid(square, self.north)
     end
 
-    if not square:isFree(false) then
-        return false
+    function class:render(x, y, z, square)
+        if not class.floorSprite then
+            class.floorSprite = IsoSprite.new()
+            class.floorSprite:LoadFramesNoDirPageSimple("media/ui/FloorTileCursor.png")
+        end
+
+        local goodColor = getCore():getGoodHighlitedColor()
+        local badColor = getCore():getBadHighlitedColor()
+        local color = goodColor
+        if not self:isValid(square) then
+            color = badColor
+        end
+
+        M.forEachWaypointFootprint(x, y, z, self.north, function(tx, ty, tz)
+            class.floorSprite:RenderGhostTileColor(tx, ty, tz, color.r, color.g, color.b, 0.4)
+        end)
+        class.floorSprite:RenderGhostTileColor(x, y, z, color.r, color.g, color.b, 0.8)
     end
 
-    return M.findWaypointAtSquare(square:getX(), square:getY(), square:getZ()) == nil
-end
-
-function ISWaypointPlacement:render(x, y, z, square)
-    if not ISWaypointPlacement.floorSprite then
-        ISWaypointPlacement.floorSprite = IsoSprite.new()
-        ISWaypointPlacement.floorSprite:LoadFramesNoDirPageSimple("media/ui/FloorTileCursor.png")
+    function class:new(sprite, northSprite, character, item)
+        local o = {}
+        setmetatable(o, self)
+        self.__index = self
+        o:init()
+        o:setSprite(sprite)
+        o:setNorthSprite(northSprite)
+        o.character = character
+        o.player = character:getPlayerNum()
+        o.item = item
+        o.noNeedHammer = true
+        o.skipBuildAction = true
+        return o
     end
 
-    local goodColor = getCore():getGoodHighlitedColor()
-    local badColor = getCore():getBadHighlitedColor()
-    local color = goodColor
-    if not self:isValid(square) then
-        color = badColor
-    end
-
-    ISWaypointPlacement.floorSprite:RenderGhostTileColor(x, y, z, color.r, color.g, color.b, 0.8)
-
-    local waypoint = M.findWaypointAtSquare(x, y, z)
-    if waypoint then
-        ISWaypointPlacement.floorSprite:RenderGhostTileColor(x, y, z, 1, 0, 0, 0.8)
-    end
-end
-
-function ISWaypointPlacement:new(sprite, northSprite, character, item)
-    local o = {}
-    setmetatable(o, self)
-    self.__index = self
-    o:init()
-    o:setSprite(sprite)
-    o:setNorthSprite(northSprite)
-    o.character = character
-    o.player = character:getPlayerNum()
-    o.item = item
-    o.noNeedHammer = true
-    o.skipBuildAction = true
-    return o
+    ISWaypointPlacement = class
+    return ISWaypointPlacement
 end
 
 local function openPlacementForItem(playerObj, item)
@@ -109,12 +179,18 @@ local function openPlacementForItem(playerObj, item)
         return
     end
 
-    local bo = ISWaypointPlacement:new(M.OBJECT_SPRITE, M.OBJECT_SPRITE, playerObj, item)
+    local placementClass = getWaypointPlacementClass()
+    if not placementClass then
+        showModalMessage("Fast travel placement is not available yet. Reload the save and try again.")
+        return
+    end
+
+    local bo = placementClass:new(M.OBJECT_SPRITE, M.OBJECT_SPRITE, playerObj, item)
     getCell():setDrag(bo, playerObj:getPlayerNum())
 end
 
-function M.startPlacement(playerNum, item)
-    local playerObj = getPlayerObj(playerNum)
+function M.startPlacement(playerRef, item)
+    local playerObj = getPlayerObj(playerRef)
     if not playerObj or not item then
         return
     end
@@ -204,7 +280,16 @@ function ISFastTravelWaypointWindow:travelToSelected()
             waypointId = waypoint.id,
         })
     else
-        M.teleportVehicleToWaypoint(playerObj, waypoint)
+        local ok, reason, minutes, distance = M.teleportVehicleToWaypoint(playerObj, waypoint)
+        if not ok then
+            showTravelFailure(reason)
+            return
+        end
+        if reason == "travel-pending" then
+            showModalMessage("Fast travel started: loading the destination area before moving the vehicle.")
+        else
+            showTravelSuccess(waypoint, minutes, distance)
+        end
     end
     self:setVisible(false)
     self:removeFromUIManager()
@@ -240,10 +325,7 @@ local function openWaypointPicker(playerObj)
     end
 
     if not M.getWaypointList() or #M.getWaypointList() == 0 then
-        local modal = ISModalDialog:new(0, 0, 320, 140, "No waypoints have been placed yet.", true, nil, nil)
-        modal:initialise()
-        modal:addToUIManager()
-        modal.moveWithMouse = true
+        showModalMessage("No waypoints have been placed yet.")
         return
     end
 
@@ -257,8 +339,8 @@ function ISFastTravelWaypointWindow.create(playerObj)
     openWaypointPicker(playerObj)
 end
 
-local function onRenameWaypoint(button, panel)
-    if button.internal ~= "OK" or not panel or not panel.waypoint then
+local function onRenameWaypoint(target, button)
+    if not target or not button or button.internal ~= "OK" or not target.waypoint then
         return
     end
 
@@ -269,18 +351,24 @@ local function onRenameWaypoint(button, panel)
         return
     end
 
-    local playerObj = panel.playerObj
+    local playerObj = target.playerObj
     if not playerObj then
         return
     end
 
     if isClient() then
         sendClientCommand(playerObj, M.MOD_ID, "RenameWaypoint", {
-            waypointId = panel.waypoint.id,
+            waypointId = target.waypoint.id,
             name = cleaned,
         })
     else
-        M.updateWaypointName(panel.waypoint.id, cleaned)
+        local waypoint = M.updateWaypointName(target.waypoint.id, cleaned)
+        if waypoint then
+            M.updateWaypointObject(waypoint)
+            if ModData and type(ModData.transmit) == "function" then
+                ModData.transmit(M.DATA_KEY)
+            end
+        end
     end
 end
 
@@ -359,7 +447,7 @@ local function onFillInventoryObjectContextMenu(playerNum, context, items)
     end
 
     if waypointItem then
-        local option = context:addOption("Place Waypoint", playerObj, M.startPlacement, waypointItem)
+        local option = context:addOption("Place Waypoint", playerNum, M.startPlacement, waypointItem)
         option.iconTexture = getTexture("media/textures/Item_WaypointMarker.png")
     end
 end
@@ -386,5 +474,16 @@ function ISVehicleMenu.showRadialMenu(playerObj)
     menu:addSlice("Fast Travel", getTexture("media/ui/vehicles/vehicle_repair.png"), openWaypointPicker, playerObj)
 end
 
+local function onServerCommand(module, command, args)
+    if module ~= M.MOD_ID then
+        return
+    end
+
+    if command == "TravelFailed" then
+        showTravelFailure(args and args.reason or nil)
+    end
+end
+
 Events.OnFillWorldObjectContextMenu.Add(onFillWorldObjectContextMenu)
 Events.OnFillInventoryObjectContextMenu.Add(onFillInventoryObjectContextMenu)
+Events.OnServerCommand.Add(onServerCommand)
