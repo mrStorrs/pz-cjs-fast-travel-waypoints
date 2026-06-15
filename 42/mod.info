@@ -1,0 +1,6 @@
+name=CJS Fast Travel Waypoints
+id=cjsFastTravelWaypoints
+description=Places reusable waypoint markers and fast-travels vehicles between them.
+poster=poster.png
+author=CJ Storrs
+versionMin=42.0.0

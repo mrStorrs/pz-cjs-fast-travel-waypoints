@@ -1,0 +1,13 @@
+module CJSFastTravelWaypoints
+{
+    imports {Base}
+
+    item WaypointMarker
+    {
+        Weight = 1.0,
+        Type = Normal,
+        DisplayName = Waypoint Marker,
+        Icon = WaypointMarker,
+        DisplayCategory = Literature,
+    }
+}
