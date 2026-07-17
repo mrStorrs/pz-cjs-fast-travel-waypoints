@@ -149,10 +149,12 @@ local function getWaypointPlacementClass()
             color = badColor
         end
 
+        local r, g, b = color:getR(), color:getG(), color:getB()
+
         M.forEachWaypointFootprint(x, y, z, self.north, function(tx, ty, tz)
-            class.floorSprite:RenderGhostTileColor(tx, ty, tz, color.r, color.g, color.b, 0.4)
+            class.floorSprite:RenderGhostTileColor(tx, ty, tz, r, g, b, 0.4)
         end)
-        class.floorSprite:RenderGhostTileColor(x, y, z, color.r, color.g, color.b, 0.8)
+        class.floorSprite:RenderGhostTileColor(x, y, z, r, g, b, 0.8)
     end
 
     function class:new(sprite, northSprite, character, item)
