@@ -33,6 +33,20 @@ local function handleRenameWaypoint(playerObj, args)
     end
 end
 
+local function handleDeleteWaypoint(playerObj, args)
+    if not playerObj or not args then
+        return
+    end
+
+    local waypointId = tostring(args.waypointId or "")
+    local ok, reason = M.deleteWaypoint(waypointId)
+    if not ok then
+        sendServerCommand(playerObj, M.MOD_ID, "WaypointDeleteFailed", {
+            reason = reason,
+        })
+    end
+end
+
 local function handleTravelToWaypoint(playerObj, args)
     if not playerObj or not args then
         return
@@ -61,6 +75,8 @@ local function onClientCommand(module, command, playerObj, args)
         handlePlaceWaypoint(playerObj, args)
     elseif command == "RenameWaypoint" then
         handleRenameWaypoint(playerObj, args)
+    elseif command == "DeleteWaypoint" then
+        handleDeleteWaypoint(playerObj, args)
     elseif command == "TravelToWaypoint" then
         handleTravelToWaypoint(playerObj, args)
     end

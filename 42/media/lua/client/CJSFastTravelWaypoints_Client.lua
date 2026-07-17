@@ -383,6 +383,48 @@ local function openRenameDialog(playerObj, waypoint)
     modal.maxChars = M.DEFAULT_MAX_NAME_LENGTH
 end
 
+local function showWaypointDeleteFailure(reason)
+    local message = "Could not delete the waypoint."
+    if reason == "missing-square" then
+        message = "Could not delete the waypoint because its map square is not loaded."
+    elseif reason == "missing-object" then
+        message = "Could not delete the waypoint because its marker object was not found."
+    end
+    showModalMessage(message)
+end
+
+local function onDeleteWaypoint(target, button)
+    if not target or not button or button.internal ~= "YES" or not target.waypoint or not target.playerObj then
+        return
+    end
+
+    if isClient() then
+        sendClientCommand(target.playerObj, M.MOD_ID, "DeleteWaypoint", {
+            waypointId = target.waypoint.id,
+        })
+        return
+    end
+
+    local ok, reason = M.deleteWaypoint(target.waypoint.id)
+    if not ok then
+        showWaypointDeleteFailure(reason)
+    end
+end
+
+local function openDeleteDialog(playerObj, waypoint)
+    local name = M.getWaypointName(waypoint)
+    local text = string.format("Delete waypoint \"%s\"?\nThis cannot be undone.", name)
+    local width = 420
+    local height = 150
+    local x = (getCore():getScreenWidth() - width) / 2
+    local y = (getCore():getScreenHeight() - height) / 2
+    local target = { playerObj = playerObj, waypoint = waypoint }
+    local modal = ISModalDialog:new(x, y, width, height, text, true, target, onDeleteWaypoint, playerObj:getPlayerNum())
+    modal:initialise()
+    modal:addToUIManager()
+    modal.moveWithMouse = true
+end
+
 local function findWaypointObjectFromWorldObjects(worldobjects)
     if not worldobjects then
         return nil
@@ -423,8 +465,9 @@ local function onFillWorldObjectContextMenu(playerNum, context, worldobjects, te
 
     local playerObj = getPlayerObj(playerNum)
     local waypoint = findWaypointObjectFromWorldObjects(worldobjects)
-    if waypoint then
+    if playerObj and waypoint then
         context:addOption("Rename Waypoint", playerObj, openRenameDialog, waypoint)
+        context:addOption("Delete Waypoint", playerObj, openDeleteDialog, waypoint)
     end
 end
 
@@ -483,6 +526,8 @@ local function onServerCommand(module, command, args)
 
     if command == "TravelFailed" then
         showTravelFailure(args and args.reason or nil)
+    elseif command == "WaypointDeleteFailed" then
+        showWaypointDeleteFailure(args and args.reason or nil)
     end
 end
 
