@@ -9,7 +9,8 @@ M._loaded = true
 M.MOD_ID = "cjsFastTravelWaypoints"
 M.DATA_KEY = "CJSFastTravelWaypoints"
 M.ITEM_FULL_TYPE = "CJSFastTravelWaypoints.WaypointMarker"
-M.OBJECT_SPRITE = "street_decoration_01_26"
+M.OBJECT_SPRITE = "street_trafficlines_01_42"
+M.LEGACY_OBJECT_SPRITE = "street_decoration_01_26"
 M.DEFAULT_MAX_NAME_LENGTH = 40
 M.DEFAULT_TRAVEL_MINUTES_PER_TILE = 1 / 30
 M.DEFAULT_XP_PER_TILE = 1 / 40
@@ -681,10 +682,39 @@ function M.getWaypointObject(square, waypointId)
     return nil
 end
 
+local function migrateLegacyWaypointMarker(object, waypoint)
+    if not object then
+        return false
+    end
+
+    if object:getSpriteName() ~= M.LEGACY_OBJECT_SPRITE then
+        return false
+    end
+
+    -- setSprite updates the persisted sprite name; setSpriteFromName then
+    -- selects the stable tile-definition sprite with FloorOverlay properties.
+    object:setSprite(M.OBJECT_SPRITE)
+    object:setSpriteFromName(M.OBJECT_SPRITE)
+
+    local square = object:getSquare()
+    if square then
+        square:RecalcProperties()
+    end
+    object:transmitUpdatedSprite()
+
+    logInfo(string.format(
+        "Migrated waypoint '%s' marker from collision-enabled cone to painted transport spot.",
+        tostring(waypoint and (waypoint.name or waypoint.id) or "Waypoint")
+    ))
+    return true
+end
+
 function M.writeWaypointObjectFields(object, waypoint)
     if not object or not waypoint then
         return
     end
+
+    migrateLegacyWaypointMarker(object, waypoint)
 
     local md = object:getModData()
     md.cjsFastTravelWaypoint = true
@@ -1383,6 +1413,8 @@ local function moveVehicleToLoadedWaypoint(vehicle, waypoint)
         ))
         return false, "vehicle-unloaded"
     end
+
+    migrateLegacyWaypointMarker(M.getWaypointObject(square, waypoint.id), waypoint)
 
     if not M.isWaypointTravelDestinationValid(waypoint, vehicle) then
         return false, "blocked-destination"
