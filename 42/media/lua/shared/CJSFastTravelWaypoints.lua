@@ -399,6 +399,23 @@ local function squareHasForeignBlockingObjects(square, waypointId)
     return false
 end
 
+local function describeOutdoorVehicleSquareRejection(square, allowedVehicle)
+    if not square then
+        return "missing-square"
+    end
+    if not square:TreatAsSolidFloor() then
+        return "not-solid-floor"
+    end
+    if square:getRoom() ~= nil then
+        return "inside-room"
+    end
+    local occupyingVehicle = square:getVehicleContainer()
+    if occupyingVehicle and occupyingVehicle ~= allowedVehicle then
+        return "occupied-by-other-vehicle"
+    end
+    return "outdoor-square-check-failed"
+end
+
 function M.isWaypointPlacementSquareValid(square, north)
     if not square then
         return false
@@ -439,6 +456,23 @@ function M.isWaypointTravelDestinationValid(waypoint, vehicle)
     end
 
     local valid = true
+    local blockedReason = nil
+    local blockedX = nil
+    local blockedY = nil
+    local blockedZ = nil
+    local blockedSquare = nil
+    local blockedOccupiedByTravelVehicle = false
+
+    local function rejectDestination(reason, tx, ty, tz, testSquare, occupiedByTravelVehicle)
+        valid = false
+        blockedReason = reason
+        blockedX = tx
+        blockedY = ty
+        blockedZ = tz
+        blockedSquare = testSquare
+        blockedOccupiedByTravelVehicle = occupiedByTravelVehicle == true
+    end
+
     M.forEachWaypointFootprint(waypoint.x, waypoint.y, waypoint.z, waypoint.north, function(tx, ty, tz, dx, dy)
         if not valid then
             return
@@ -446,19 +480,55 @@ function M.isWaypointTravelDestinationValid(waypoint, vehicle)
 
         local testSquare = cell:getGridSquare(tx, ty, tz)
         local occupiedByTravelVehicle = squareContainsAllowedVehicle(testSquare, vehicle)
-        if not testSquare or not isOutdoorVehicleSquare(testSquare, vehicle) then
-            valid = false
+        if not testSquare then
+            rejectDestination("missing-square", tx, ty, tz, nil, false)
+            return
+        end
+        if not isOutdoorVehicleSquare(testSquare, vehicle) then
+            rejectDestination(
+                describeOutdoorVehicleSquareRejection(testSquare, vehicle),
+                tx,
+                ty,
+                tz,
+                testSquare,
+                occupiedByTravelVehicle
+            )
             return
         end
 
         if dx == 0 and dy == 0 then
             if testSquare.isFree and not testSquare:isFree(false) and not occupiedByTravelVehicle and squareHasForeignBlockingObjects(testSquare, waypoint.id) then
-                valid = false
+                rejectDestination("center-blocked-by-foreign-object", tx, ty, tz, testSquare, false)
             end
         elseif (not testSquare.isFree or not testSquare:isFree(false)) and not occupiedByTravelVehicle then
-            valid = false
+            rejectDestination("footprint-not-free", tx, ty, tz, testSquare, false)
         end
     end)
+
+    if not valid then
+        local objectCount = -1
+        if blockedSquare then
+            local okCount, count = tryCall(function()
+                return blockedSquare:getObjects():size()
+            end)
+            if okCount then
+                objectCount = count
+            end
+        end
+        logInfo(string.format(
+            "Destination guard rejected waypoint '%s': reason=%s tile=(%s, %s, %s) center=(%s, %s, %s) occupiedByTravelVehicle=%s objectCount=%s.",
+            tostring(waypoint.name or waypoint.id or "Waypoint"),
+            tostring(blockedReason),
+            tostring(blockedX),
+            tostring(blockedY),
+            tostring(blockedZ),
+            tostring(waypoint.x),
+            tostring(waypoint.y),
+            tostring(waypoint.z),
+            tostring(blockedOccupiedByTravelVehicle),
+            tostring(objectCount)
+        ))
+    end
     return valid
 end
 
@@ -1439,6 +1509,7 @@ function M.processDeferredVehicleTravel()
 
     local okMove, reason, destX, destY, destZ, finalX, finalY, finalZ = moveVehicleToLoadedWaypoint(vehicle, waypoint)
     if not okMove then
+        logInfo("Deferred vehicle travel is rolling back after move failure: " .. tostring(reason))
         state.deferChunkPinRelease = true
         restoreDeferredPlayerToVehicle(state, vehicle)
         clearDeferredVehicleTravel(state)
