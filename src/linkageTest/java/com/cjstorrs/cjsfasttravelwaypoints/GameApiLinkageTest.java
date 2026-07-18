@@ -13,6 +13,7 @@ public final class GameApiLinkageTest {
         ClassLoader loader = GameApiLinkageTest.class.getClassLoader();
         Class<?> baseVehicle = Class.forName("zombie.vehicles.BaseVehicle", false, loader);
         Class<?> transform = Class.forName("zombie.core.physics.Transform", false, loader);
+        Class<?> bullet = Class.forName("zombie.core.physics.Bullet", false, loader);
         Class<?> vector3f = Class.forName("org.joml.Vector3f", false, loader);
         Class<?> isoChunk = Class.forName("zombie.iso.IsoChunk", false, loader);
         Class<?> isoChunkMap = Class.forName("zombie.iso.IsoChunkMap", false, loader);
@@ -33,6 +34,17 @@ public final class GameApiLinkageTest {
             "BaseVehicle.setWorldTransform return type changed");
         check(baseVehicle.getMethod("getX").getReturnType() == float.class, "BaseVehicle.getX return type changed");
         check(baseVehicle.getMethod("getY").getReturnType() == float.class, "BaseVehicle.getY return type changed");
+        check(baseVehicle.getField("vehicleId").getType() == short.class, "BaseVehicle.vehicleId type changed");
+        check(baseVehicle.getField("jniLinearVelocity").getType() == vector3f,
+            "BaseVehicle.jniLinearVelocity type changed");
+        check(baseVehicle.getMethod("setSpeedKmHour", float.class).getReturnType() == void.class,
+            "BaseVehicle.setSpeedKmHour signature changed");
+        check(vector3f.getMethod("set", float.class, float.class, float.class).getReturnType() == vector3f,
+            "Vector3f.set(float, float, float) signature changed");
+        check(bullet.getMethod("getOwnVehiclePhysics", int.class, float[].class).getReturnType() == int.class,
+            "Bullet.getOwnVehiclePhysics signature changed");
+        check(bullet.getMethod("setOwnVehiclePhysics", int.class, float[].class, boolean.class).getReturnType() == int.class,
+            "Bullet.setOwnVehiclePhysics signature changed");
 
         Field origin = transform.getField("origin");
         check(origin.getType() == vector3f, "Transform.origin type changed");
@@ -72,6 +84,11 @@ public final class GameApiLinkageTest {
             "VehicleBridge.setVehicleWorldPosition must remain public and static");
         check(move.getReturnType() == boolean.class, "VehicleBridge.setVehicleWorldPosition return type changed");
         checkGlobalLuaMethod(move, "cjsFastTravelSetVehicleWorldPosition");
+
+        Method clearVelocity = bridge.getMethod("clearVehicleLinearVelocity", baseVehicle);
+        check(clearVelocity.getReturnType() == boolean.class,
+            "VehicleBridge.clearVehicleLinearVelocity return type changed");
+        checkGlobalLuaMethod(clearVelocity, "cjsFastTravelClearVehicleLinearVelocity");
 
         Method getVehicleChunk = bridge.getMethod("getVehicleChunk", baseVehicle);
         check(getVehicleChunk.getReturnType() == isoChunk, "VehicleBridge.getVehicleChunk return type changed");

@@ -1395,7 +1395,7 @@ local function ensureVehicleChunkMatchesSquare(vehicle, square)
     return true, nil
 end
 
-local function moveVehicleToLoadedWaypoint(vehicle, waypoint)
+local function moveVehicleToLoadedWaypoint(vehicle, waypoint, clearDeferredMomentum)
     if not vehicle or not waypoint then
         return false, "invalid-args"
     end
@@ -1485,6 +1485,19 @@ local function moveVehicleToLoadedWaypoint(vehicle, waypoint)
         pcall(vehicle.updateBulletStats, vehicle)
         pcall(vehicle.updatePhysics, vehicle)
         pcall(vehicle.updatePhysicsNetwork, vehicle)
+    end
+
+    if clearDeferredMomentum then
+        local okClear, cleared = tryCall(function()
+            return cjsFastTravelClearVehicleLinearVelocity
+                and cjsFastTravelClearVehicleLinearVelocity(vehicle)
+                or false
+        end)
+        if okClear and cleared == true then
+            logInfo("Cleared deferred vehicle momentum before physics reactivation.")
+        else
+            logInfo("Could not clear deferred vehicle momentum before physics reactivation: " .. tostring(cleared))
+        end
     end
 
     local okPhysicsOn, errPhysicsOn = tryCall(function()
@@ -1619,7 +1632,7 @@ function M.processDeferredVehicleTravel()
         return
     end
 
-    local okMove, reason, destX, destY, destZ, finalX, finalY, finalZ = moveVehicleToLoadedWaypoint(vehicle, waypoint)
+    local okMove, reason, destX, destY, destZ, finalX, finalY, finalZ = moveVehicleToLoadedWaypoint(vehicle, waypoint, true)
     if not okMove then
         logInfo("Deferred vehicle travel is rolling back after move failure: " .. tostring(reason))
         state.deferChunkPinRelease = true

@@ -1,11 +1,14 @@
 package zombie.vehicles;
 
+import org.joml.Vector3f;
 import zombie.core.physics.Transform;
 import zombie.iso.IsoChunk;
 import zombie.iso.IsoGridSquare;
 
 public class BaseVehicle {
     public IsoChunk chunk;
+    public short vehicleId;
+    public final Vector3f jniLinearVelocity = new Vector3f();
 
     public static Transform allocTransform() {
         throw new AssertionError("compile-only stub");
@@ -28,6 +31,10 @@ public class BaseVehicle {
     }
 
     public float getY() {
+        throw new AssertionError("compile-only stub");
+    }
+
+    public void setSpeedKmHour(float speedKmHour) {
         throw new AssertionError("compile-only stub");
     }
 

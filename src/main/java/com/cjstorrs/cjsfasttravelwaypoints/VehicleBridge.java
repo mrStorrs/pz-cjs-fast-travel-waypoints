@@ -2,6 +2,7 @@ package com.cjstorrs.cjsfasttravelwaypoints;
 
 import java.util.ArrayList;
 import se.krka.kahlua.integration.annotations.LuaMethod;
+import zombie.core.physics.Bullet;
 import zombie.core.physics.Transform;
 import zombie.iso.ChunkSaveWorker;
 import zombie.iso.IsoChunk;
@@ -10,6 +11,12 @@ import zombie.iso.IsoGridSquare;
 import zombie.vehicles.BaseVehicle;
 
 public final class VehicleBridge {
+    private static final int VEHICLE_PHYSICS_STATE_SIZE = 27;
+    // B42.19 native vehicle state stores position, rotation, then linear velocity.
+    private static final int LINEAR_VELOCITY_X_INDEX = 7;
+    private static final int LINEAR_VELOCITY_Y_INDEX = 8;
+    private static final int LINEAR_VELOCITY_Z_INDEX = 9;
+
     private VehicleBridge() {
     }
 
@@ -29,6 +36,29 @@ public final class VehicleBridge {
         } finally {
             BaseVehicle.releaseTransform(transform);
         }
+    }
+
+    @LuaMethod(name = "cjsFastTravelClearVehicleLinearVelocity", global = true)
+    public static boolean clearVehicleLinearVelocity(BaseVehicle vehicle) {
+        if (vehicle == null || vehicle.vehicleId < 0) {
+            return false;
+        }
+
+        float[] physicsState = new float[VEHICLE_PHYSICS_STATE_SIZE];
+        if (Bullet.getOwnVehiclePhysics(vehicle.vehicleId, physicsState) != 0) {
+            return false;
+        }
+
+        physicsState[LINEAR_VELOCITY_X_INDEX] = 0.0F;
+        physicsState[LINEAR_VELOCITY_Y_INDEX] = 0.0F;
+        physicsState[LINEAR_VELOCITY_Z_INDEX] = 0.0F;
+        if (Bullet.setOwnVehiclePhysics(vehicle.vehicleId, physicsState, false) != 0) {
+            return false;
+        }
+
+        vehicle.jniLinearVelocity.set(0.0F, 0.0F, 0.0F);
+        vehicle.setSpeedKmHour(0.0F);
+        return true;
     }
 
     @LuaMethod(name = "cjsFastTravelGetVehicleChunk", global = true)
