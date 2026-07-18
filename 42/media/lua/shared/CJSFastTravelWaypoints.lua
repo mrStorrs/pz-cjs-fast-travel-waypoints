@@ -358,6 +358,32 @@ function M.preloadWaypointDestination(waypoint)
     return loaded
 end
 
+local function isWaypointFootprintLoaded(waypoint)
+    if not waypoint then
+        return false, nil, nil, nil
+    end
+
+    local cell = getCell()
+    if not cell then
+        return false, nil, nil, nil
+    end
+
+    local loaded = true
+    local missingX = nil
+    local missingY = nil
+    local missingZ = nil
+    M.forEachWaypointFootprint(waypoint.x, waypoint.y, waypoint.z, waypoint.north, function(tx, ty, tz)
+        if loaded and not cell:getGridSquare(tx, ty, tz) then
+            loaded = false
+            missingX = tx
+            missingY = ty
+            missingZ = tz
+        end
+    end)
+
+    return loaded, missingX, missingY, missingZ
+end
+
 local function isOutdoorVehicleSquare(square, allowedVehicle)
     local occupyingVehicle = square and square.getVehicleContainer and square:getVehicleContainer() or nil
     return square
@@ -985,6 +1011,49 @@ local function enterPlayerVehicleSeat(vehicle, playerObj, seat)
     return true, nil
 end
 
+local function suspendDeferredVehiclePartUpdates(state, vehicle)
+    if not state or not vehicle then
+        return
+    end
+
+    local okNeedPartsUpdate, needPartsUpdate = tryCall(function()
+        return vehicle:needPartsUpdate()
+    end)
+    if not okNeedPartsUpdate then
+        logInfo("Could not read vehicle part-update state before deferred travel: " .. tostring(needPartsUpdate))
+        return
+    end
+
+    local okSuspend, errSuspend = tryCall(function()
+        vehicle:setNeedPartsUpdate(false)
+    end)
+    if not okSuspend then
+        logInfo("Could not suspend vehicle part updates during deferred travel: " .. tostring(errSuspend))
+        return
+    end
+
+    state.vehicleNeedPartsUpdate = needPartsUpdate == true
+    state.vehiclePartUpdatesSuspended = true
+end
+
+local function restoreDeferredVehiclePartUpdates(state, vehicle)
+    if not state or not state.vehiclePartUpdatesSuspended then
+        return
+    end
+    state.vehiclePartUpdatesSuspended = false
+
+    if not vehicle then
+        return
+    end
+
+    local okRestore, errRestore = tryCall(function()
+        vehicle:setNeedPartsUpdate(state.vehicleNeedPartsUpdate == true)
+    end)
+    if not okRestore then
+        logInfo("Could not restore vehicle part-update state after deferred travel: " .. tostring(errRestore))
+    end
+end
+
 local function restoreDeferredPlayerToVehicle(state, vehicle)
     if not state or not state.playerObj then
         return
@@ -1442,6 +1511,7 @@ local function finishSuccessfulTravel(playerObj, waypoint, minutes, distance, de
 end
 
 local function clearDeferredVehicleTravel(state)
+    restoreDeferredVehiclePartUpdates(state, state and state.vehicle or nil)
     if state and state.callback and Events and Events.OnPlayerUpdate then
         Events.OnPlayerUpdate.Remove(state.callback)
     end
@@ -1471,7 +1541,17 @@ function M.processDeferredVehicleTravel()
 
     local cell = getCell()
     local square = cell and cell:getGridSquare(waypoint.x, waypoint.y, waypoint.z)
-    if not playerObj:getCurrentSquare() or not square then
+    local footprintLoaded, missingX, missingY, missingZ = isWaypointFootprintLoaded(waypoint)
+    if not playerObj:getCurrentSquare() or not square or not footprintLoaded then
+        if not footprintLoaded and not state.waitingForFootprintLogged then
+            state.waitingForFootprintLogged = true
+            logInfo(string.format(
+                "Deferred vehicle travel is waiting for the complete waypoint footprint; first missing square=(%s, %s, %s).",
+                tostring(missingX),
+                tostring(missingY),
+                tostring(missingZ)
+            ))
+        end
         state.retries = state.retries - 1
         if state.retries <= 0 then
             local vehicle = resolveDeferredVehicle(state)
@@ -1595,8 +1675,11 @@ function M.startDeferredVehicleTravel(playerObj, vehicle, waypoint, distance, mi
         logInfo("setPhysicsActive(false) failed before deferred travel staging: " .. tostring(errPhysicsOff))
     end
 
+    suspendDeferredVehiclePartUpdates(state, vehicle)
+
     local okPlayerMove, errPlayerMove = setMovingObjectPosition(playerObj, stagingX, stagingY, stagingZ)
     if not okPlayerMove then
+        restoreDeferredVehiclePartUpdates(state, vehicle)
         tryCall(function()
             vehicle:setPhysicsActive(true)
         end)
@@ -1648,7 +1731,8 @@ function M.teleportVehicleToWaypoint(playerObj, waypoint)
 
     local cell = getCell()
     local square = cell and cell:getGridSquare(waypoint.x, waypoint.y, waypoint.z)
-    if not square then
+    local footprintLoaded = isWaypointFootprintLoaded(waypoint)
+    if not square or not footprintLoaded then
         return M.startDeferredVehicleTravel(playerObj, vehicle, waypoint, distance, minutes)
     end
 
