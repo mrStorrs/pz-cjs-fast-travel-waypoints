@@ -932,6 +932,66 @@ local function restoreDeferredPlayerToVehicle(state, vehicle)
     setMovingObjectPosition(state.playerObj, state.originX, state.originY, state.originZ)
 end
 
+local function removeVehicleFromJavaList(list, vehicle)
+    if not list or not vehicle or not list.size or not list.get or not list.remove then
+        return
+    end
+
+    for i = list:size() - 1, 0, -1 do
+        local okGet, item = tryCall(function()
+            return list:get(i)
+        end)
+        if okGet and item == vehicle then
+            tryCall(function()
+                list:remove(i)
+            end)
+        end
+    end
+end
+
+local function ensureVehicleInJavaList(list, vehicle)
+    if not list or not vehicle or not list.contains or not list.add then
+        return false, "missing-list-methods"
+    end
+
+    local okContains, containsVehicle = tryCall(function()
+        return list:contains(vehicle)
+    end)
+    if not okContains then
+        return false, containsVehicle
+    end
+
+    if containsVehicle then
+        return true, nil
+    end
+
+    local okAdd, errAdd = tryCall(function()
+        list:add(vehicle)
+    end)
+    if not okAdd then
+        return false, errAdd
+    end
+
+    return true, nil
+end
+
+local function getVehicleChunk(vehicle)
+    if not vehicle then
+        return nil
+    end
+
+    if vehicle.chunk then
+        return vehicle.chunk
+    end
+
+    local square = vehicle.getSquare and vehicle:getSquare() or nil
+    if square and square.getChunk then
+        return square:getChunk()
+    end
+
+    return nil
+end
+
 local function getDeferredChunkPinMap()
     local cell = getCell()
     if not cell then
@@ -940,7 +1000,7 @@ local function getDeferredChunkPinMap()
 
     for index = 1, 3 do
         local okMap, chunkMap = tryCall(function()
-            return cell:getChunkMap(index)
+            return cell.getChunkMap and cell:getChunkMap(index) or nil
         end)
         local playerAtIndex = nil
         if getSpecificPlayer then
@@ -951,7 +1011,7 @@ local function getDeferredChunkPinMap()
                 playerAtIndex = playerObj
             end
         end
-        if okMap and chunkMap and not playerAtIndex then
+        if okMap and chunkMap and not playerAtIndex and chunkMap.ignore == true then
             return chunkMap, index
         end
     end
@@ -960,9 +1020,8 @@ local function getDeferredChunkPinMap()
 end
 
 local function pinVehicleOriginChunk(vehicle)
-    local originSquare = vehicle and vehicle:getSquare() or nil
-    local originChunk = originSquare and originSquare:getChunk() or nil
-    if not originSquare or not originChunk then
+    local chunk = getVehicleChunk(vehicle)
+    if not chunk or not chunk.refs then
         return nil, "missing-origin-chunk"
     end
 
@@ -971,85 +1030,87 @@ local function pinVehicleOriginChunk(vehicle)
         return nil, "missing-pin-map"
     end
 
-    local chunkSize = tonumber(IsoChunkMap and IsoChunkMap.CHUNK_SIZE_IN_SQUARES) or M.DEFAULT_CHUNK_SIZE_IN_SQUARES
-    local chunkX = math.floor(originSquare:getX() / chunkSize)
-    local chunkY = math.floor(originSquare:getY() / chunkSize)
-
-    local okReset, errReset = tryCall(function()
-        pinMap:Unload()
+    local okContains, containsPin = tryCall(function()
+        return chunk.refs:contains(pinMap)
     end)
-    if not okReset then
-        return nil, errReset
+    if not okContains then
+        return nil, containsPin
     end
 
-    local okLoad, loadedChunk = tryCall(function()
-        return pinMap:LoadChunkForLater(chunkX, chunkY, 0, 0)
-    end)
-    if not okLoad or loadedChunk ~= originChunk then
-        tryCall(function()
-            pinMap:SwapChunkBuffers()
+    local added = false
+    if not containsPin then
+        local okAdd, errAdd = tryCall(function()
+            chunk.refs:add(pinMap)
         end)
-        tryCall(function()
-            pinMap:Unload()
-        end)
-        return nil, okLoad and "origin-chunk-pin-mismatch" or loadedChunk
-    end
-
-    local okSwap, errSwap = tryCall(function()
-        pinMap:SwapChunkBuffers()
-    end)
-    if not okSwap then
-        tryCall(function()
-            pinMap:SwapChunkBuffers()
-        end)
-        tryCall(function()
-            pinMap:Unload()
-        end)
-        return nil, errSwap
-    end
-
-    local okVerify, pinnedChunk = tryCall(function()
-        return pinMap:getChunk(0, 0)
-    end)
-    if not okVerify or pinnedChunk ~= originChunk then
-        tryCall(function()
-            pinMap:Unload()
-        end)
-        return nil, okVerify and "origin-chunk-pin-verification-failed" or pinnedChunk
+        if not okAdd then
+            return nil, errAdd
+        end
+        added = true
     end
 
     logInfo(string.format(
         "Pinned origin chunk (%s, %s) with spare chunk map %s for deferred vehicle travel.",
-        tostring(chunkX),
-        tostring(chunkY),
+        tostring(chunk.wx),
+        tostring(chunk.wy),
         tostring(pinMapIndex)
     ))
 
     return {
+        chunk = chunk,
         pinMap = pinMap,
         pinMapIndex = pinMapIndex,
-        wx = chunkX,
-        wy = chunkY,
+        added = added,
+        wx = chunk.wx,
+        wy = chunk.wy,
     }, nil
 end
 
 local function releaseDeferredChunkPin(state)
     local pin = state and state.originChunkPin or nil
-    if not pin or not pin.pinMap then
+    if not pin or not pin.chunk or not pin.pinMap then
         return
     end
     state.originChunkPin = nil
 
-    local okUnload, errUnload = tryCall(function()
-        pin.pinMap:Unload()
-    end)
+    local chunk = pin.chunk
+    if chunk.refs and pin.added then
+        tryCall(function()
+            if chunk.refs:contains(pin.pinMap) then
+                chunk.refs:remove(pin.pinMap)
+            end
+        end)
+    end
+
+    local refsEmpty = false
+    if chunk.refs then
+        local okEmpty, empty = tryCall(function()
+            return chunk.refs:isEmpty()
+        end)
+        refsEmpty = okEmpty and empty == true
+    end
+
+    if refsEmpty then
+        local sharedKey = (tonumber(pin.wx) or 0) * 65536 + (tonumber(pin.wy) or 0)
+        if IsoChunkMap and IsoChunkMap.SharedChunks and IsoChunkMap.SharedChunks.remove then
+            tryCall(function()
+                IsoChunkMap.SharedChunks:remove(sharedKey)
+            end)
+        end
+        tryCall(function()
+            chunk:removeFromWorld()
+        end)
+        if ChunkSaveWorker and ChunkSaveWorker.instance and ChunkSaveWorker.instance.Add then
+            tryCall(function()
+                ChunkSaveWorker.instance:Add(chunk)
+            end)
+        end
+    end
 
     logInfo(string.format(
-        "Released deferred travel pin for origin chunk (%s, %s); success=%s%s.",
+        "Released deferred travel pin for origin chunk (%s, %s); refsEmpty=%s.",
         tostring(pin.wx),
         tostring(pin.wy),
-        tostring(okUnload),
-        okUnload and "" or " error=" .. tostring(errUnload)
+        tostring(refsEmpty)
     ))
 end
 
@@ -1063,43 +1124,49 @@ local function ensureVehicleChunkMatchesSquare(vehicle, square)
         return false, "missing-destination-chunk"
     end
 
-    tryCall(function()
-        vehicle:setSquare(square)
-    end)
-    tryCall(function()
-        vehicle:setCurrent(square)
-    end)
-    tryCall(function()
-        vehicle:setCurrentSquareFromPosition(vehicle:getX(), vehicle:getY(), vehicle:getZ())
-    end)
+    local originChunk = getVehicleChunk(vehicle)
+    if not originChunk then
+        return false, "missing-origin-chunk"
+    end
+
+    if vehicle.setSquare then
+        tryCall(function()
+            vehicle:setSquare(square)
+        end)
+    end
+    if vehicle.setCurrent then
+        tryCall(function()
+            vehicle:setCurrent(square)
+        end)
+    end
+    if vehicle.setCurrentSquareFromPosition then
+        tryCall(function()
+            vehicle:setCurrentSquareFromPosition(vehicle:getX(), vehicle:getY(), vehicle:getZ())
+        end)
+    end
 
     -- BaseVehicle.update migrates vehicle.chunk when current square moves to a new chunk.
-    local okUpdate, errUpdate = tryCall(function()
-        vehicle:update()
-    end)
-    if not okUpdate then
-        return false, errUpdate
+    if vehicle.update then
+        local okUpdate, errUpdate = tryCall(function()
+            vehicle:update()
+        end)
+        if not okUpdate then
+            return false, errUpdate
+        end
     end
 
-    if isVehicleRemovedFromWorld(vehicle) then
-        return false, "vehicle-unloaded"
-    end
-
-    local currentSquare = vehicle:getSquare()
-    local currentChunk = currentSquare and currentSquare:getChunk() or nil
+    local currentChunk = getVehicleChunk(vehicle)
     if currentChunk ~= destChunk then
         return false, "vehicle-chunk-mismatch"
     end
 
-    local cell = square:getCell()
-    local vehicles = cell and cell:getVehicles() or nil
-    if vehicles then
-        local okContains, containsVehicle = tryCall(function()
-            return vehicles:contains(vehicle)
-        end)
-        if not okContains or not containsVehicle then
-            return false, okContains and "vehicle-missing-from-cell" or containsVehicle
-        end
+    if originChunk ~= destChunk then
+        removeVehicleFromJavaList(originChunk.vehicles, vehicle)
+    end
+
+    local okList, errList = ensureVehicleInJavaList(destChunk.vehicles, vehicle)
+    if not okList then
+        return false, errList
     end
 
     return true, nil
