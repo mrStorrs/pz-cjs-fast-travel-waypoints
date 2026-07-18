@@ -8,6 +8,10 @@ require "Vehicles/ISUI/ISVehicleMenu"
 require "CJSFastTravelWaypoints"
 
 local M = CJSFastTravelWaypoints
+local UI_BORDER_SPACING = 10
+local FONT_HGT_SMALL = getTextManager():getFontHeight(UIFont.Small)
+local BUTTON_HGT = math.max(28, FONT_HGT_SMALL + 10)
+local WAYPOINT_ROW_HGT = math.max(30, FONT_HGT_SMALL + 10)
 
 local function getPlayerObj(playerRef)
     if playerRef == nil then
@@ -205,30 +209,72 @@ function ISFastTravelWaypointWindow:initialise()
     ISCollapsableWindowJoypad.initialise(self)
 
     local titleHeight = self:titleBarHeight()
-    self.waypointList = ISScrollingListBox:new(10, titleHeight + 10, self.width - 20, self.height - 80)
+    local listY = titleHeight + UI_BORDER_SPACING
+    local buttonY = self.height - UI_BORDER_SPACING - BUTTON_HGT
+    local listHeight = buttonY - UI_BORDER_SPACING - listY
+
+    self.waypointList = ISScrollingListBox:new(
+        UI_BORDER_SPACING,
+        listY,
+        self.width - UI_BORDER_SPACING * 2,
+        listHeight
+    )
     self.waypointList:initialise()
     self.waypointList:instantiate()
-    self.waypointList.itemheight = 24
+    self.waypointList.itemheight = WAYPOINT_ROW_HGT
     self.waypointList.font = UIFont.Small
     self.waypointList.doDrawItem = self.drawWaypointItem
     self.waypointList.drawBorder = true
     self.waypointList.joypadParent = self
     self:addChild(self.waypointList)
 
-    self.travelButton = ISButton:new(10, self.height - 60, 90, 24, "Travel", self, ISFastTravelWaypointWindow.onClick)
+    local buttonWidth = math.max(110, getTextManager():MeasureStringX(UIFont.Small, "Refresh") + 24)
+    self.travelButton = ISButton:new(
+        UI_BORDER_SPACING,
+        buttonY,
+        buttonWidth,
+        BUTTON_HGT,
+        "Travel",
+        self,
+        ISFastTravelWaypointWindow.onClick
+    )
     self.travelButton.internal = "TRAVEL"
+    self.travelButton.anchorTop = false
+    self.travelButton.anchorBottom = true
     self.travelButton:initialise()
     self.travelButton:instantiate()
     self:addChild(self.travelButton)
 
-    self.renameButton = ISButton:new(110, self.height - 60, 90, 24, "Refresh", self, ISFastTravelWaypointWindow.onClick)
+    self.renameButton = ISButton:new(
+        self.travelButton:getRight() + UI_BORDER_SPACING,
+        buttonY,
+        buttonWidth,
+        BUTTON_HGT,
+        "Refresh",
+        self,
+        ISFastTravelWaypointWindow.onClick
+    )
     self.renameButton.internal = "REFRESH"
+    self.renameButton.anchorTop = false
+    self.renameButton.anchorBottom = true
     self.renameButton:initialise()
     self.renameButton:instantiate()
     self:addChild(self.renameButton)
 
-    self.closeButton = ISButton:new(self.width - 100, self.height - 60, 90, 24, "Close", self, ISFastTravelWaypointWindow.onClick)
+    self.closeButton = ISButton:new(
+        self.width - UI_BORDER_SPACING - buttonWidth,
+        buttonY,
+        buttonWidth,
+        BUTTON_HGT,
+        "Close",
+        self,
+        ISFastTravelWaypointWindow.onClick
+    )
     self.closeButton.internal = "CLOSE"
+    self.closeButton.anchorLeft = false
+    self.closeButton.anchorRight = true
+    self.closeButton.anchorTop = false
+    self.closeButton.anchorBottom = true
     self.closeButton:initialise()
     self.closeButton:instantiate()
     self.closeButton:enableCancelColor()
@@ -253,9 +299,11 @@ function ISFastTravelWaypointWindow:drawWaypointItem(y, item, alt)
         self:drawRect(0, y, self:getWidth(), self.itemheight - 1, 0.3, 0.7, 0.35, 0.15)
     end
     self:drawRectBorder(0, y, self:getWidth(), self.itemheight - 1, 0.5, 0.7, 0.7, 0.7)
-    self:drawText(item.item.name, 10, y + 4, 1, 1, 1, 1, self.font)
+    local textY = y + math.floor((self.itemheight - FONT_HGT_SMALL) / 2)
+    self:drawText(item.item.name, UI_BORDER_SPACING, textY, 1, 1, 1, 1, self.font)
     local coords = string.format("(%d, %d, %d)", item.item.x, item.item.y, item.item.z)
-    self:drawText(coords, self:getWidth() - 120, y + 4, 0.8, 0.8, 0.8, 1, self.font)
+    local coordsWidth = getTextManager():MeasureStringX(self.font, coords)
+    self:drawText(coords, self:getWidth() - UI_BORDER_SPACING - coordsWidth, textY, 0.8, 0.8, 0.8, 1, self.font)
     return y + self.itemheight
 end
 
@@ -309,10 +357,13 @@ function ISFastTravelWaypointWindow:onClick(button)
 end
 
 function ISFastTravelWaypointWindow:new(playerObj)
-    local width = 520
-    local height = 360
-    local x = getCore():getScreenWidth() / 2 - width / 2
-    local y = getCore():getScreenHeight() / 2 - height / 2
+    local screenWidth = getCore():getScreenWidth()
+    local screenHeight = getCore():getScreenHeight()
+    local width = math.min(680, screenWidth - UI_BORDER_SPACING * 4)
+    local preferredHeight = math.max(440, WAYPOINT_ROW_HGT * 11 + BUTTON_HGT + UI_BORDER_SPACING * 5)
+    local height = math.min(preferredHeight, screenHeight - UI_BORDER_SPACING * 4)
+    local x = math.floor(screenWidth / 2 - width / 2)
+    local y = math.floor(screenHeight / 2 - height / 2)
     local o = ISCollapsableWindowJoypad.new(self, x, y, width, height)
     o.player = playerObj
     o.playerNum = playerObj:getPlayerNum()

@@ -294,47 +294,21 @@ local function setVehicleWorldTransformPosition(vehicle, destX, destY)
         return false, "vehicle is unavailable"
     end
 
-    if not BaseVehicle or not BaseVehicle.allocTransform or not BaseVehicle.allocMatrix4f then
-        return false, "B42.19 vehicle transform APIs are unavailable"
+    if not cjsFastTravelSetVehicleWorldPosition then
+        return false, "B42.19 vehicle relocation bridge is unavailable; approve the mod's Java component and restart"
     end
 
-    local okTransform, transform = tryCall(function()
-        return BaseVehicle.allocTransform()
+    local okMove, moved = tryCall(function()
+        return cjsFastTravelSetVehicleWorldPosition(vehicle, destX, destY)
     end)
-    if not okTransform or not transform then
-        return false, transform or "could not allocate vehicle transform"
+    if not okMove then
+        return false, moved
+    end
+    if moved ~= true then
+        return false, "B42.19 vehicle relocation bridge rejected the destination"
     end
 
-    local okMatrix, matrix = tryCall(function()
-        return BaseVehicle.allocMatrix4f()
-    end)
-    if not okMatrix or not matrix then
-        tryCall(function()
-            BaseVehicle.releaseTransform(transform)
-        end)
-        return false, matrix or "could not allocate vehicle transform matrix"
-    end
-
-    local okMove, errMove = tryCall(function()
-        vehicle:getWorldTransform(transform)
-        transform:getMatrix(matrix)
-
-        local deltaX = destX - vehicle:getX()
-        local deltaY = destY - vehicle:getY()
-        matrix:setTranslation(matrix:m30() + deltaX, matrix:m31(), matrix:m32() + deltaY)
-
-        transform:set(matrix)
-        vehicle:setWorldTransform(transform)
-    end)
-
-    tryCall(function()
-        BaseVehicle.releaseMatrix4f(matrix)
-    end)
-    tryCall(function()
-        BaseVehicle.releaseTransform(transform)
-    end)
-
-    return okMove, errMove
+    return true, nil
 end
 
 local function getFootprintRanges(north)
