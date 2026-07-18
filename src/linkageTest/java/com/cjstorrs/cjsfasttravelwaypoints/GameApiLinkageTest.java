@@ -14,6 +14,10 @@ public final class GameApiLinkageTest {
         Class<?> baseVehicle = Class.forName("zombie.vehicles.BaseVehicle", false, loader);
         Class<?> transform = Class.forName("zombie.core.physics.Transform", false, loader);
         Class<?> vector3f = Class.forName("org.joml.Vector3f", false, loader);
+        Class<?> isoChunk = Class.forName("zombie.iso.IsoChunk", false, loader);
+        Class<?> isoChunkMap = Class.forName("zombie.iso.IsoChunkMap", false, loader);
+        Class<?> isoGridSquare = Class.forName("zombie.iso.IsoGridSquare", false, loader);
+        Class<?> chunkSaveWorker = Class.forName("zombie.iso.ChunkSaveWorker", false, loader);
 
         Method allocTransform = baseVehicle.getMethod("allocTransform");
         check(Modifier.isStatic(allocTransform.getModifiers()), "BaseVehicle.allocTransform must remain static");
@@ -36,6 +40,28 @@ public final class GameApiLinkageTest {
         check(vector3f.getField("x").getType() == float.class, "Vector3f.x type changed");
         check(vector3f.getField("z").getType() == float.class, "Vector3f.z type changed");
 
+        check(baseVehicle.getField("chunk").getType() == isoChunk, "BaseVehicle.chunk type changed");
+        check(baseVehicle.getMethod("getSquare").getReturnType() == isoGridSquare,
+            "BaseVehicle.getSquare return type changed");
+        check(isoGridSquare.getMethod("getChunk").getReturnType() == isoChunk,
+            "IsoGridSquare.getChunk return type changed");
+
+        Field refs = isoChunk.getField("refs");
+        check(refs.getType() == java.util.ArrayList.class, "IsoChunk.refs type changed");
+        check(Modifier.isFinal(refs.getModifiers()), "IsoChunk.refs must remain final");
+        Field vehicles = isoChunk.getField("vehicles");
+        check(vehicles.getType() == java.util.ArrayList.class, "IsoChunk.vehicles type changed");
+        check(Modifier.isFinal(vehicles.getModifiers()), "IsoChunk.vehicles must remain final");
+        check(isoChunk.getField("wx").getType() == int.class, "IsoChunk.wx type changed");
+        check(isoChunk.getField("wy").getType() == int.class, "IsoChunk.wy type changed");
+        check(isoChunkMap.getField("ignore").getType() == boolean.class, "IsoChunkMap.ignore type changed");
+        check(isoChunkMap.getField("SharedChunks").getType() == java.util.HashMap.class,
+            "IsoChunkMap.SharedChunks type changed");
+        check(chunkSaveWorker.getField("instance").getType() == chunkSaveWorker,
+            "ChunkSaveWorker.instance type changed");
+        check(chunkSaveWorker.getMethod("Add", isoChunk).getReturnType() == void.class,
+            "ChunkSaveWorker.Add signature changed");
+
         Class<?> bridge = Class.forName(
             "com.cjstorrs.cjsfasttravelwaypoints.VehicleBridge",
             false,
@@ -45,20 +71,61 @@ public final class GameApiLinkageTest {
         check(Modifier.isPublic(move.getModifiers()) && Modifier.isStatic(move.getModifiers()),
             "VehicleBridge.setVehicleWorldPosition must remain public and static");
         check(move.getReturnType() == boolean.class, "VehicleBridge.setVehicleWorldPosition return type changed");
+        checkGlobalLuaMethod(move, "cjsFastTravelSetVehicleWorldPosition");
 
-        Annotation luaMethod = findAnnotation(move, "se.krka.kahlua.integration.annotations.LuaMethod");
-        check(luaMethod != null, "VehicleBridge LuaMethod annotation is missing");
-        Method name = luaMethod.annotationType().getMethod("name");
-        Method global = luaMethod.annotationType().getMethod("global");
-        check("cjsFastTravelSetVehicleWorldPosition".equals(name.invoke(luaMethod)),
-            "VehicleBridge Lua function name changed");
-        check(Boolean.TRUE.equals(global.invoke(luaMethod)), "VehicleBridge Lua function must remain global");
+        Method getVehicleChunk = bridge.getMethod("getVehicleChunk", baseVehicle);
+        check(getVehicleChunk.getReturnType() == isoChunk, "VehicleBridge.getVehicleChunk return type changed");
+        checkGlobalLuaMethod(getVehicleChunk, "cjsFastTravelGetVehicleChunk");
+
+        Method getChunkRefs = bridge.getMethod("getChunkRefs", isoChunk);
+        check(getChunkRefs.getReturnType() == java.util.ArrayList.class,
+            "VehicleBridge.getChunkRefs return type changed");
+        checkGlobalLuaMethod(getChunkRefs, "cjsFastTravelGetChunkRefs");
+
+        Method getChunkVehicles = bridge.getMethod("getChunkVehicles", isoChunk);
+        check(getChunkVehicles.getReturnType() == java.util.ArrayList.class,
+            "VehicleBridge.getChunkVehicles return type changed");
+        checkGlobalLuaMethod(getChunkVehicles, "cjsFastTravelGetChunkVehicles");
+
+        Method getChunkWx = bridge.getMethod("getChunkWx", isoChunk);
+        check(getChunkWx.getReturnType() == int.class, "VehicleBridge.getChunkWx return type changed");
+        checkGlobalLuaMethod(getChunkWx, "cjsFastTravelGetChunkWx");
+
+        Method getChunkWy = bridge.getMethod("getChunkWy", isoChunk);
+        check(getChunkWy.getReturnType() == int.class, "VehicleBridge.getChunkWy return type changed");
+        checkGlobalLuaMethod(getChunkWy, "cjsFastTravelGetChunkWy");
+
+        Method isChunkMapIgnored = bridge.getMethod("isChunkMapIgnored", isoChunkMap);
+        check(isChunkMapIgnored.getReturnType() == boolean.class,
+            "VehicleBridge.isChunkMapIgnored return type changed");
+        checkGlobalLuaMethod(isChunkMapIgnored, "cjsFastTravelIsChunkMapIgnored");
+
+        Method removeSharedChunk = bridge.getMethod("removeSharedChunk", int.class);
+        check(removeSharedChunk.getReturnType() == void.class,
+            "VehicleBridge.removeSharedChunk return type changed");
+        checkGlobalLuaMethod(removeSharedChunk, "cjsFastTravelRemoveSharedChunk");
+
+        Method queueChunkSave = bridge.getMethod("queueChunkSave", isoChunk);
+        check(queueChunkSave.getReturnType() == void.class,
+            "VehicleBridge.queueChunkSave return type changed");
+        checkGlobalLuaMethod(queueChunkSave, "cjsFastTravelQueueChunkSave");
 
         bridge.getDeclaredConstructor();
         Class<?> exposer = Class.forName("me.zed_0xff.zombie_buddy.Exposer", false, loader);
         Method hasGlobalLuaMethod = exposer.getMethod("hasGlobalLuaMethod", Class.class);
         check(Boolean.TRUE.equals(hasGlobalLuaMethod.invoke(null, bridge)),
             "ZombieBuddy did not recognize the vehicle bridge's global Lua method");
+    }
+
+    private static void checkGlobalLuaMethod(Method method, String expectedName) throws ReflectiveOperationException {
+        check(Modifier.isPublic(method.getModifiers()) && Modifier.isStatic(method.getModifiers()),
+            method.getName() + " must remain public and static");
+        Annotation luaMethod = findAnnotation(method, "se.krka.kahlua.integration.annotations.LuaMethod");
+        check(luaMethod != null, method.getName() + " LuaMethod annotation is missing");
+        Method name = luaMethod.annotationType().getMethod("name");
+        Method global = luaMethod.annotationType().getMethod("global");
+        check(expectedName.equals(name.invoke(luaMethod)), method.getName() + " Lua function name changed");
+        check(Boolean.TRUE.equals(global.invoke(luaMethod)), method.getName() + " Lua function must remain global");
     }
 
     private static Annotation findAnnotation(Method method, String className) {

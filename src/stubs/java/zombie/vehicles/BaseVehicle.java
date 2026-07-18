@@ -1,8 +1,12 @@
 package zombie.vehicles;
 
 import zombie.core.physics.Transform;
+import zombie.iso.IsoChunk;
+import zombie.iso.IsoGridSquare;
 
 public class BaseVehicle {
+    public IsoChunk chunk;
+
     public static Transform allocTransform() {
         throw new AssertionError("compile-only stub");
     }
@@ -24,6 +28,10 @@ public class BaseVehicle {
     }
 
     public float getY() {
+        throw new AssertionError("compile-only stub");
+    }
+
+    public IsoGridSquare getSquare() {
         throw new AssertionError("compile-only stub");
     }
 }

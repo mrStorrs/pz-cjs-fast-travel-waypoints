@@ -976,20 +976,57 @@ local function ensureVehicleInJavaList(list, vehicle)
 end
 
 local function getVehicleChunk(vehicle)
-    if not vehicle then
+    if not vehicle or not cjsFastTravelGetVehicleChunk then
         return nil
     end
 
-    if vehicle.chunk then
-        return vehicle.chunk
-    end
-
-    local square = vehicle.getSquare and vehicle:getSquare() or nil
-    if square and square.getChunk then
-        return square:getChunk()
+    local okChunk, chunk = tryCall(function()
+        return cjsFastTravelGetVehicleChunk(vehicle)
+    end)
+    if okChunk then
+        return chunk
     end
 
     return nil
+end
+
+local function getChunkRefs(chunk)
+    if not chunk or not cjsFastTravelGetChunkRefs then
+        return nil
+    end
+
+    local okRefs, refs = tryCall(function()
+        return cjsFastTravelGetChunkRefs(chunk)
+    end)
+    return okRefs and refs or nil
+end
+
+local function getChunkVehicles(chunk)
+    if not chunk or not cjsFastTravelGetChunkVehicles then
+        return nil
+    end
+
+    local okVehicles, vehicles = tryCall(function()
+        return cjsFastTravelGetChunkVehicles(chunk)
+    end)
+    return okVehicles and vehicles or nil
+end
+
+local function getChunkCoordinates(chunk)
+    if not chunk or not cjsFastTravelGetChunkWx or not cjsFastTravelGetChunkWy then
+        return nil, nil
+    end
+
+    local okWx, wx = tryCall(function()
+        return cjsFastTravelGetChunkWx(chunk)
+    end)
+    local okWy, wy = tryCall(function()
+        return cjsFastTravelGetChunkWy(chunk)
+    end)
+    if not okWx or not okWy then
+        return nil, nil
+    end
+    return wx, wy
 end
 
 local function getDeferredChunkPinMap()
@@ -1011,8 +1048,13 @@ local function getDeferredChunkPinMap()
                 playerAtIndex = playerObj
             end
         end
-        if okMap and chunkMap and not playerAtIndex and chunkMap.ignore == true then
-            return chunkMap, index
+        if okMap and chunkMap and not playerAtIndex then
+            local okIgnored, ignored = tryCall(function()
+                return cjsFastTravelIsChunkMapIgnored and cjsFastTravelIsChunkMapIgnored(chunkMap) or false
+            end)
+            if okIgnored and ignored == true then
+                return chunkMap, index
+            end
         end
     end
 
@@ -1021,7 +1063,8 @@ end
 
 local function pinVehicleOriginChunk(vehicle)
     local chunk = getVehicleChunk(vehicle)
-    if not chunk or not chunk.refs then
+    local refs = getChunkRefs(chunk)
+    if not chunk or not refs then
         return nil, "missing-origin-chunk"
     end
 
@@ -1031,7 +1074,7 @@ local function pinVehicleOriginChunk(vehicle)
     end
 
     local okContains, containsPin = tryCall(function()
-        return chunk.refs:contains(pinMap)
+        return refs:contains(pinMap)
     end)
     if not okContains then
         return nil, containsPin
@@ -1040,7 +1083,7 @@ local function pinVehicleOriginChunk(vehicle)
     local added = false
     if not containsPin then
         local okAdd, errAdd = tryCall(function()
-            chunk.refs:add(pinMap)
+            refs:add(pinMap)
         end)
         if not okAdd then
             return nil, errAdd
@@ -1048,10 +1091,20 @@ local function pinVehicleOriginChunk(vehicle)
         added = true
     end
 
+    local wx, wy = getChunkCoordinates(chunk)
+    if wx == nil or wy == nil then
+        if added then
+            tryCall(function()
+                refs:remove(pinMap)
+            end)
+        end
+        return nil, "missing-origin-chunk-coordinates"
+    end
+
     logInfo(string.format(
         "Pinned origin chunk (%s, %s) with spare chunk map %s for deferred vehicle travel.",
-        tostring(chunk.wx),
-        tostring(chunk.wy),
+        tostring(wx),
+        tostring(wy),
         tostring(pinMapIndex)
     ))
 
@@ -1060,8 +1113,8 @@ local function pinVehicleOriginChunk(vehicle)
         pinMap = pinMap,
         pinMapIndex = pinMapIndex,
         added = added,
-        wx = chunk.wx,
-        wy = chunk.wy,
+        wx = wx,
+        wy = wy,
     }, nil
 end
 
@@ -1073,35 +1126,36 @@ local function releaseDeferredChunkPin(state)
     state.originChunkPin = nil
 
     local chunk = pin.chunk
-    if chunk.refs and pin.added then
+    local refs = getChunkRefs(chunk)
+    if refs and pin.added then
         tryCall(function()
-            if chunk.refs:contains(pin.pinMap) then
-                chunk.refs:remove(pin.pinMap)
+            if refs:contains(pin.pinMap) then
+                refs:remove(pin.pinMap)
             end
         end)
     end
 
     local refsEmpty = false
-    if chunk.refs then
+    if refs then
         local okEmpty, empty = tryCall(function()
-            return chunk.refs:isEmpty()
+            return refs:isEmpty()
         end)
         refsEmpty = okEmpty and empty == true
     end
 
     if refsEmpty then
         local sharedKey = (tonumber(pin.wx) or 0) * 65536 + (tonumber(pin.wy) or 0)
-        if IsoChunkMap and IsoChunkMap.SharedChunks and IsoChunkMap.SharedChunks.remove then
+        if cjsFastTravelRemoveSharedChunk then
             tryCall(function()
-                IsoChunkMap.SharedChunks:remove(sharedKey)
+                cjsFastTravelRemoveSharedChunk(sharedKey)
             end)
         end
         tryCall(function()
             chunk:removeFromWorld()
         end)
-        if ChunkSaveWorker and ChunkSaveWorker.instance and ChunkSaveWorker.instance.Add then
+        if cjsFastTravelQueueChunkSave then
             tryCall(function()
-                ChunkSaveWorker.instance:Add(chunk)
+                cjsFastTravelQueueChunkSave(chunk)
             end)
         end
     end
@@ -1145,7 +1199,7 @@ local function ensureVehicleChunkMatchesSquare(vehicle, square)
         end)
     end
 
-    -- BaseVehicle.update migrates vehicle.chunk when current square moves to a new chunk.
+    -- BaseVehicle.update migrates the vehicle's chunk when current square moves to a new chunk.
     if vehicle.update then
         local okUpdate, errUpdate = tryCall(function()
             vehicle:update()
@@ -1161,10 +1215,10 @@ local function ensureVehicleChunkMatchesSquare(vehicle, square)
     end
 
     if originChunk ~= destChunk then
-        removeVehicleFromJavaList(originChunk.vehicles, vehicle)
+        removeVehicleFromJavaList(getChunkVehicles(originChunk), vehicle)
     end
 
-    local okList, errList = ensureVehicleInJavaList(destChunk.vehicles, vehicle)
+    local okList, errList = ensureVehicleInJavaList(getChunkVehicles(destChunk), vehicle)
     if not okList then
         return false, errList
     end
