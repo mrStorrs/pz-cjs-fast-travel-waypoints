@@ -11,6 +11,12 @@ M.DATA_KEY = "CJSFastTravelWaypoints"
 M.ITEM_FULL_TYPE = "CJSFastTravelWaypoints.WaypointMarker"
 M.OBJECT_SPRITE = "street_trafficlines_01_42"
 M.LEGACY_OBJECT_SPRITE = "street_decoration_01_26"
+M.WAYPOINT_CORNER_SPRITES = {
+    minXMinY = "street_trafficlines_01_25",
+    maxXMinY = "street_trafficlines_01_27",
+    maxXMaxY = "street_trafficlines_01_29",
+    minXMaxY = "street_trafficlines_01_31",
+}
 M.DEFAULT_MAX_NAME_LENGTH = 40
 M.DEFAULT_TRAVEL_MINUTES_PER_TILE = 1 / 30
 M.DEFAULT_XP_PER_TILE = 1 / 40
@@ -326,6 +332,18 @@ function M.forEachWaypointFootprint(x, y, z, north, callback)
             callback(x + dx, y + dy, z, dx, dy)
         end
     end
+end
+
+function M.forEachWaypointCorner(waypoint, callback)
+    if not waypoint or not callback then
+        return
+    end
+
+    local minX, maxX, minY, maxY = getFootprintRanges(waypoint.north)
+    callback(waypoint.x + minX, waypoint.y + minY, waypoint.z, "minXMinY", M.WAYPOINT_CORNER_SPRITES.minXMinY)
+    callback(waypoint.x + maxX, waypoint.y + minY, waypoint.z, "maxXMinY", M.WAYPOINT_CORNER_SPRITES.maxXMinY)
+    callback(waypoint.x + maxX, waypoint.y + maxY, waypoint.z, "maxXMaxY", M.WAYPOINT_CORNER_SPRITES.maxXMaxY)
+    callback(waypoint.x + minX, waypoint.y + maxY, waypoint.z, "minXMaxY", M.WAYPOINT_CORNER_SPRITES.minXMaxY)
 end
 
 function M.preloadWaypointDestination(waypoint)
@@ -674,12 +692,32 @@ function M.getWaypointObject(square, waypointId)
         local object = objects:get(i)
         if object and M.isWaypointObject(object) then
             local md = object:getModData()
-            if tostring(md.waypointId) == tostring(waypointId) then
+            if tostring(md.waypointId) == tostring(waypointId)
+                and md.cjsFastTravelMarkerRole ~= "corner" then
                 return object
             end
         end
     end
     return nil
+end
+
+local function writeWaypointMarkerIdentity(object, waypoint, markerRole, cornerKey)
+    local md = object:getModData()
+    md.cjsFastTravelWaypoint = true
+    md.cjsFastTravelMarkerRole = markerRole
+    md.cjsFastTravelCorner = cornerKey
+    md.waypointId = tostring(waypoint.id)
+    md.waypointName = waypoint.name
+    md.waypointNorth = not not waypoint.north
+    md.waypointX = waypoint.x
+    md.waypointY = waypoint.y
+    md.waypointZ = waypoint.z
+    if object.setName then
+        object:setName(waypoint.name)
+    end
+    if object.transmitModData then
+        object:transmitModData()
+    end
 end
 
 local function migrateLegacyWaypointMarker(object, waypoint)
@@ -716,23 +754,97 @@ function M.writeWaypointObjectFields(object, waypoint)
 
     migrateLegacyWaypointMarker(object, waypoint)
 
-    local md = object:getModData()
-    md.cjsFastTravelWaypoint = true
-    md.waypointId = tostring(waypoint.id)
-    md.waypointName = waypoint.name
-    md.waypointNorth = not not waypoint.north
-    md.waypointX = waypoint.x
-    md.waypointY = waypoint.y
-    md.waypointZ = waypoint.z
-    if object.setName then
-        object:setName(waypoint.name)
-    end
+    writeWaypointMarkerIdentity(object, waypoint, "center", nil)
     if object.setDir and IsoDirections then
         object:setDir(waypoint.north and IsoDirections.N or IsoDirections.W)
     end
-    if object.transmitModData then
-        object:transmitModData()
+end
+
+local function getWaypointCornerObject(square, waypointId, cornerKey)
+    if not square or not square.getObjects then
+        return nil
     end
+
+    local objects = square:getObjects()
+    for i = 0, objects:size() - 1 do
+        local object = objects:get(i)
+        if object and M.isWaypointObject(object) then
+            local md = object:getModData()
+            if tostring(md.waypointId) == tostring(waypointId)
+                and md.cjsFastTravelMarkerRole == "corner"
+                and tostring(md.cjsFastTravelCorner) == tostring(cornerKey) then
+                return object
+            end
+        end
+    end
+    return nil
+end
+
+local function updateWaypointMarkerSprite(object, spriteName)
+    if object:getSpriteName() == spriteName then
+        return
+    end
+
+    object:setSprite(spriteName)
+    object:setSpriteFromName(spriteName)
+    local square = object:getSquare()
+    if square then
+        square:RecalcProperties()
+    end
+    object:transmitUpdatedSprite()
+end
+
+local function createWaypointCornerObject(square, waypoint, cornerKey, spriteName)
+    local object = IsoObject.new(square, spriteName, "")
+    if not object then
+        return nil
+    end
+
+    square:AddSpecialObject(object)
+    writeWaypointMarkerIdentity(object, waypoint, "corner", cornerKey)
+    if object.transmitCompleteItemToServer then
+        object:transmitCompleteItemToServer()
+    end
+    return object
+end
+
+function M.ensureWaypointCornerObjects(waypoint)
+    if not waypoint then
+        return 0
+    end
+
+    local cell = getCell()
+    if not cell then
+        return 0
+    end
+
+    local created = 0
+    M.forEachWaypointCorner(waypoint, function(x, y, z, cornerKey, spriteName)
+        local square = cell:getGridSquare(x, y, z)
+        if not square then
+            return
+        end
+
+        local object = getWaypointCornerObject(square, waypoint.id, cornerKey)
+        if object then
+            updateWaypointMarkerSprite(object, spriteName)
+            writeWaypointMarkerIdentity(object, waypoint, "corner", cornerKey)
+            return
+        end
+
+        if createWaypointCornerObject(square, waypoint, cornerKey, spriteName) then
+            created = created + 1
+        end
+    end)
+
+    if created > 0 then
+        logInfo(string.format(
+            "Added %d painted footprint corner marking(s) for waypoint '%s'.",
+            created,
+            tostring(waypoint.name or waypoint.id or "Waypoint")
+        ))
+    end
+    return created
 end
 
 function M.createWaypointObject(square, waypoint)
@@ -750,6 +862,7 @@ function M.createWaypointObject(square, waypoint)
     if object.transmitCompleteItemToServer then
         object:transmitCompleteItemToServer()
     end
+    M.ensureWaypointCornerObjects(waypoint)
     return object
 end
 
@@ -784,6 +897,7 @@ function M.updateWaypointObject(waypoint)
     local object = M.getWaypointObject(square, waypoint.id)
     if object then
         M.writeWaypointObjectFields(object, waypoint)
+        M.ensureWaypointCornerObjects(waypoint)
         return object
     end
 
@@ -796,22 +910,43 @@ function M.deleteWaypoint(waypointId)
         return false, "missing-waypoint"
     end
 
-    local cell = getCell()
-    local square = cell and cell:getGridSquare(waypoint.x, waypoint.y, waypoint.z)
-    if not square then
+    local footprintLoaded = isWaypointFootprintLoaded(waypoint)
+    if not footprintLoaded then
         return false, "missing-square"
     end
 
+    local cell = getCell()
+    local square = cell:getGridSquare(waypoint.x, waypoint.y, waypoint.z)
     local object = M.getWaypointObject(square, waypoint.id)
     if not object then
         return false, "missing-object"
     end
 
-    local okRemove, removedIndex = tryCall(function()
-        return square:transmitRemoveItemFromSquare(object)
+    local markerObjects = {}
+    M.forEachWaypointFootprint(waypoint.x, waypoint.y, waypoint.z, waypoint.north, function(x, y, z)
+        local markerSquare = cell:getGridSquare(x, y, z)
+        local objects = markerSquare:getObjects()
+        for i = 0, objects:size() - 1 do
+            local markerObject = objects:get(i)
+            if markerObject and M.isWaypointObject(markerObject) then
+                local markerData = markerObject:getModData()
+                if tostring(markerData.waypointId) == tostring(waypoint.id) then
+                    markerObjects[#markerObjects + 1] = {
+                        square = markerSquare,
+                        object = markerObject,
+                    }
+                end
+            end
+        end
     end)
-    if not okRemove or (type(removedIndex) == "number" and removedIndex < 0) then
-        return false, okRemove and "remove-failed" or removedIndex
+
+    for _, marker in ipairs(markerObjects) do
+        local okRemove, removedIndex = tryCall(function()
+            return marker.square:transmitRemoveItemFromSquare(marker.object)
+        end)
+        if not okRemove or (type(removedIndex) == "number" and removedIndex < 0) then
+            return false, okRemove and "remove-failed" or removedIndex
+        end
     end
 
     local md = M.getGlobalData()
@@ -1553,6 +1688,7 @@ local function finishSuccessfulTravel(playerObj, waypoint, minutes, distance, de
     if ModData and type(ModData.transmit) == "function" then
         ModData.transmit(M.DATA_KEY)
     end
+    M.ensureWaypointCornerObjects(waypoint)
 end
 
 local function clearDeferredVehicleTravel(state)
@@ -1819,6 +1955,14 @@ if Events and Events.OnGameStart then
     Events.OnGameStart.Add(function()
         if isClient() then
             M.requestGlobalData()
+            return
+        end
+
+        local cell = getCell()
+        for _, waypoint in ipairs(M.getWaypointList()) do
+            if cell and cell:getGridSquare(waypoint.x, waypoint.y, waypoint.z) then
+                M.updateWaypointObject(waypoint)
+            end
         end
     end)
 end
